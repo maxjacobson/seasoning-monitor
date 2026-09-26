@@ -24,6 +24,9 @@ Ideas and planned work for seasoning-monitor. Rough order, not a commitment.
 - [ ] **Error log view** — a key that opens a filtered (`5xx`, `FATAL`) journal
       or nginx error view, rather than only counts.
 - [ ] **Watch the Cloudflare tunnel** (`cloudflared`) alongside nginx.
+- [ ] **Pending system package upgrades** — show whether the Pi has OS package
+      updates waiting (e.g. `apt list --upgradable`) and how many. Read-only for
+      now; installing them is a bigger, mutating step.
 - [ ] **Historical traffic** — the journal only keeps ~3 days for this unit, so
       anything past that needs nginx access logs (~14 days) or an app-side
       rollup.
