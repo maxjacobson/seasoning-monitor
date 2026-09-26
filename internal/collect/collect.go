@@ -28,7 +28,6 @@ type Snapshot struct {
 	TempC       float64
 	TempOK      bool
 	Uptime      string
-	Timer       Timer
 	Services    []Service
 }
 
@@ -69,23 +68,20 @@ func (t Timer) Overdue(now time.Time) bool {
 	return t.NextOK && !t.Next.After(now)
 }
 
-// Summary renders a compact, single-line description of the timer relative to
-// now, e.g. "next Sat 00:00 in 24m  ·  last 23h ago".
-func (t Timer) Summary(now time.Time) string {
-	if !t.NextOK && !t.LastOK {
-		return "unknown"
-	}
+// Relative renders a compact description of the timer relative to now, e.g.
+// "ran 23h ago  ·  next in 24m".
+func (t Timer) Relative(now time.Time) string {
 	var parts []string
+	if t.LastOK {
+		parts = append(parts, fmt.Sprintf("ran %s ago", shortDuration(now.Sub(t.Last))))
+	}
 	switch {
 	case !t.NextOK:
-		// no next elapse to show
+		// no scheduled elapse to mention
 	case t.Next.After(now):
-		parts = append(parts, fmt.Sprintf("next %s in %s", t.Next.Format("Mon 15:04"), shortDuration(t.Next.Sub(now))))
+		parts = append(parts, fmt.Sprintf("next in %s", shortDuration(t.Next.Sub(now))))
 	default:
-		parts = append(parts, fmt.Sprintf("next %s overdue by %s", t.Next.Format("Mon 15:04"), shortDuration(now.Sub(t.Next))))
-	}
-	if t.LastOK {
-		parts = append(parts, fmt.Sprintf("last %s ago", shortDuration(now.Sub(t.Last))))
+		parts = append(parts, fmt.Sprintf("overdue by %s", shortDuration(now.Sub(t.Next))))
 	}
 	return strings.Join(parts, "  ·  ")
 }
@@ -114,6 +110,8 @@ type Service struct {
 	Result      string
 	ExitStatus  int
 	ExitTime    string
+	// Timer is the timer that fires this service, if any.
+	Timer *Timer
 }
 
 // Label is the unit name without its `.service` suffix.
@@ -191,7 +189,7 @@ echo '@@SM:LOAD@@'; cat /proc/loadavg
 echo '@@SM:NPROC@@'; nproc
 echo '@@SM:TEMP@@'; vcgencmd measure_temp 2>/dev/null || echo 'temp=N/A'
 echo '@@SM:UPTIME@@'; uptime -p 2>/dev/null || uptime
-echo '@@SM:TIMER@@'; systemctl list-timers seasoning-nightly.timer --output=json --no-pager 2>/dev/null || true
+echo '@@SM:TIMERS@@'; systemctl list-timers --all --output=json --no-pager 2>/dev/null || true
 echo '@@SM:NOW@@'; date +%s
 for u in $(systemctl list-units --all --no-legend --no-pager 'seasoning*.service' | awk '$1 ~ /^seasoning.*\.service$/ {print $1}'); do
   echo "@@SM:SVC:$u@@"
@@ -271,10 +269,15 @@ func parseSnapshot(out string, now time.Time) (Snapshot, error) {
 	snap.Mem = parseMem(s.plain["MEM"])
 	snap.Load = parseLoad(s.plain["LOAD"], s.plain["NPROC"])
 	snap.TempC, snap.TempOK = parseTemp(s.plain["TEMP"])
-	snap.Timer = parseTimer(s.plain["TIMER"])
 
+	timers := parseTimers(s.plain["TIMERS"])
 	for _, unit := range s.svcList {
-		snap.Services = append(snap.Services, serviceFromKV(unit, s.svcs[unit]))
+		svc := serviceFromKV(unit, s.svcs[unit])
+		if t, ok := timers[unit]; ok {
+			timer := t
+			svc.Timer = &timer
+		}
+		snap.Services = append(snap.Services, svc)
 	}
 	sortServices(snap.Services)
 	return snap, nil
@@ -289,26 +292,34 @@ type timerJSON struct {
 	Last      *int64 `json:"last"`
 }
 
-func parseTimer(s string) Timer {
+// parseTimers indexes timers by the service unit they activate, so each
+// service can find its own schedule.
+func parseTimers(s string) map[string]Timer {
 	s = strings.TrimSpace(s)
 	if s == "" {
-		return Timer{}
+		return nil
 	}
 	var entries []timerJSON
-	if err := json.Unmarshal([]byte(s), &entries); err != nil || len(entries) == 0 {
-		return Timer{}
+	if err := json.Unmarshal([]byte(s), &entries); err != nil {
+		return nil
 	}
-	e := entries[0]
-	t := Timer{Unit: e.Unit, Activates: e.Activates}
-	if e.Next != nil && *e.Next > 0 {
-		t.Next = microsToTime(*e.Next)
-		t.NextOK = true
+	out := make(map[string]Timer, len(entries))
+	for _, e := range entries {
+		if e.Activates == "" {
+			continue
+		}
+		t := Timer{Unit: e.Unit, Activates: e.Activates}
+		if e.Next != nil && *e.Next > 0 {
+			t.Next = microsToTime(*e.Next)
+			t.NextOK = true
+		}
+		if e.Last != nil && *e.Last > 0 {
+			t.Last = microsToTime(*e.Last)
+			t.LastOK = true
+		}
+		out[e.Activates] = t
 	}
-	if e.Last != nil && *e.Last > 0 {
-		t.Last = microsToTime(*e.Last)
-		t.LastOK = true
-	}
-	return t
+	return out
 }
 
 func microsToTime(us int64) time.Time {

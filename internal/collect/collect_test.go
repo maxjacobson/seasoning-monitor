@@ -22,8 +22,8 @@ const sampleOutput = `@@SM:DISK@@
 temp=48.3'C
 @@SM:UPTIME@@
 up 3 days, 4 hours
-@@SM:TIMER@@
-[{"next":1790395200000000,"left":1790395200000000,"last":1790308807915788,"passed":472465858216,"unit":"seasoning-nightly.timer","activates":"seasoning-nightly.service"}]
+@@SM:TIMERS@@
+[{"next":1790395200000000,"left":1790395200000000,"last":1790308807915788,"passed":472465858216,"unit":"seasoning-nightly.timer","activates":"seasoning-nightly.service"},{"next":null,"last":null,"unit":"unrelated.timer","activates":"unrelated.service"}]
 @@SM:NOW@@
 1790394840
 @@SM:SVC:seasoning-nightly.service@@
@@ -71,19 +71,6 @@ func TestParseSnapshot(t *testing.T) {
 	if snap.CollectedAt.Unix() != 1790394840 {
 		t.Errorf("CollectedAt = %v, want NOW from the host", snap.CollectedAt.Unix())
 	}
-	if !snap.Timer.NextOK || snap.Timer.Next.Unix() != 1790395200 {
-		t.Errorf("timer next = %v ok=%v", snap.Timer.Next, snap.Timer.NextOK)
-	}
-	if !snap.Timer.LastOK || snap.Timer.Last.Unix() != 1790308807 {
-		t.Errorf("timer last = %v ok=%v", snap.Timer.Last, snap.Timer.LastOK)
-	}
-	if snap.Timer.Unit != "seasoning-nightly.timer" {
-		t.Errorf("timer unit = %q", snap.Timer.Unit)
-	}
-	summary := snap.Timer.Summary(snap.CollectedAt)
-	if !strings.Contains(summary, "in 6m") || !strings.Contains(summary, "last 23h ago") {
-		t.Errorf("timer summary = %q", summary)
-	}
 
 	if len(snap.Services) != 3 {
 		t.Fatalf("got %d services, want 3", len(snap.Services))
@@ -98,6 +85,9 @@ func TestParseSnapshot(t *testing.T) {
 	if snap.Services[0].Label() != "seasoning" {
 		t.Errorf("app label = %q", snap.Services[0].Label())
 	}
+	if snap.Services[0].Timer != nil {
+		t.Errorf("the app has no timer: %+v", snap.Services[0].Timer)
+	}
 
 	nightly := snap.Services[1]
 	if nightly.Unit != "seasoning-nightly.service" || !nightly.OK() {
@@ -105,6 +95,21 @@ func TestParseSnapshot(t *testing.T) {
 	}
 	if nightly.ExitTime != "Fri 2026-09-25 00:02:06 EDT" {
 		t.Errorf("nightly exit time = %q", nightly.ExitTime)
+	}
+	if nightly.Timer == nil {
+		t.Fatalf("nightly should have a timer attached: %+v", nightly)
+	}
+	if !nightly.Timer.NextOK || nightly.Timer.Next.Unix() != 1790395200 {
+		t.Errorf("nightly timer next = %v ok=%v", nightly.Timer.Next, nightly.Timer.NextOK)
+	}
+	if !nightly.Timer.LastOK || nightly.Timer.Last.Unix() != 1790308807 {
+		t.Errorf("nightly timer last = %v ok=%v", nightly.Timer.Last, nightly.Timer.LastOK)
+	}
+	if nightly.Timer.Unit != "seasoning-nightly.timer" {
+		t.Errorf("nightly timer unit = %q", nightly.Timer.Unit)
+	}
+	if rel := nightly.Timer.Relative(snap.CollectedAt); !strings.Contains(rel, "next in 6m") || !strings.Contains(rel, "ran 23h ago") {
+		t.Errorf("nightly timer relative = %q", rel)
 	}
 }
 
@@ -122,6 +127,9 @@ func TestMissingUnitIsNotOK(t *testing.T) {
 	}
 	if prune.OK() {
 		t.Errorf("a unit that is not installed must never be OK: %+v", prune)
+	}
+	if prune.Timer != nil {
+		t.Errorf("prune should have no timer: %+v", prune.Timer)
 	}
 }
 
@@ -190,34 +198,65 @@ func TestStreamLogs(t *testing.T) {
 	}
 }
 
-func TestParseTimerEdgeCases(t *testing.T) {
-	cases := []struct {
+func TestParseTimersEdgeCases(t *testing.T) {
+	empty := []struct {
 		name string
 		in   string
 	}{
 		{"empty", ""},
 		{"malformed", "not json"},
 		{"empty array", "[]"},
-		{"null times", `[{"unit":"t.timer","next":null,"last":0}]`},
+		{"no activates", `[{"unit":"t.timer","activates":"","next":123}]`},
 	}
-	for _, c := range cases {
-		if got := parseTimer(c.in); got.NextOK || got.LastOK {
-			t.Errorf("%s: expected unknown, got %+v", c.name, got)
+	for _, c := range empty {
+		if got := parseTimers(c.in); len(got) != 0 {
+			t.Errorf("%s: expected no timers, got %+v", c.name, got)
 		}
+	}
+
+	// A timer whose times are null is still indexed, just without a schedule.
+	got := parseTimers(`[{"unit":"t.timer","activates":"t.service","next":null,"last":0}]`)
+	tm, ok := got["t.service"]
+	if !ok {
+		t.Fatalf("expected t.service to be indexed, got %+v", got)
+	}
+	if tm.NextOK || tm.LastOK {
+		t.Errorf("null times should not produce a schedule: %+v", tm)
+	}
+	if tm.Relative(time.Now()) != "" {
+		t.Errorf("a schedule-less timer should render as empty, got %q", tm.Relative(time.Now()))
 	}
 }
 
-func TestTimerSummaryOverdue(t *testing.T) {
+func TestParseTimersIndexesByActivates(t *testing.T) {
+	in := `[{"unit":"a.timer","activates":"a.service","next":2000000,"last":1000000}]`
+	got := parseTimers(in)
+	tm, ok := got["a.service"]
+	if !ok {
+		t.Fatalf("expected a.service in %+v", got)
+	}
+	if tm.Unit != "a.timer" || !tm.NextOK || !tm.LastOK {
+		t.Errorf("timer = %+v", tm)
+	}
+	if tm.Next.Unix() != 2 || tm.Last.Unix() != 1 {
+		t.Errorf("next=%v last=%v", tm.Next, tm.Last)
+	}
+}
+
+func TestTimerRelative(t *testing.T) {
 	now := time.Unix(1000, 0)
-	tm := Timer{Next: now.Add(-5 * time.Minute), NextOK: true}
-	if !tm.Overdue(now) {
+
+	overdue := Timer{Next: now.Add(-5 * time.Minute), NextOK: true}
+	if !overdue.Overdue(now) {
 		t.Errorf("expected the timer to be overdue")
 	}
-	if got := tm.Summary(now); !strings.Contains(got, "overdue") {
-		t.Errorf("summary = %q", got)
+	if got := overdue.Relative(now); !strings.Contains(got, "overdue by 5m") {
+		t.Errorf("relative = %q", got)
 	}
-	if got := (Timer{}).Summary(now); got != "unknown" {
-		t.Errorf("empty summary = %q", got)
+
+	upcoming := Timer{Next: now.Add(6 * time.Minute), NextOK: true, Last: now.Add(-23 * time.Hour), LastOK: true}
+	if got := upcoming.Relative(now); got != "ran 23h ago  ·  next in 6m" {
+		t.Errorf("relative = %q", got)
 	}
 }
 

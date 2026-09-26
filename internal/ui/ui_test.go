@@ -12,8 +12,9 @@ import (
 )
 
 func sampleSnapshot() collect.Snapshot {
+	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
 	return collect.Snapshot{
-		CollectedAt: time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC),
+		CollectedAt: now,
 		Disk:        collect.Disk{Percent: 12, Avail: "24G", Mount: "/"},
 		Mem:         collect.Mem{TotalMB: 8192, UsedMB: 2048, AvailableMB: 5500},
 		Load:        collect.Load{One: 0.15, Five: 0.42, Fifteen: 0.30, NProc: 4},
@@ -22,7 +23,10 @@ func sampleSnapshot() collect.Snapshot {
 		Uptime:      "up 3 days",
 		Services: []collect.Service{
 			{Unit: "seasoning.service", LoadState: "loaded", ActiveState: "active"},
-			{Unit: "seasoning-nightly.service", LoadState: "loaded", ActiveState: "inactive", Result: "success"},
+			{
+				Unit: "seasoning-nightly.service", LoadState: "loaded", ActiveState: "inactive", Result: "success",
+				Timer: &collect.Timer{Unit: "seasoning-nightly.timer", Next: now.Add(20 * time.Minute), NextOK: true, Last: now.Add(-23 * time.Hour), LastOK: true},
+			},
 			{Unit: "seasoning-prune.service", LoadState: "not-found", Result: "success"},
 		},
 	}
@@ -102,6 +106,37 @@ func TestSummaryShowsHealth(t *testing.T) {
 		if !strings.Contains(view, want) {
 			t.Errorf("summary missing %q\n%s", want, view)
 		}
+	}
+	if strings.Contains(view, " timer ") {
+		t.Errorf("the timer should not be a global header line:\n%s", view)
+	}
+}
+
+func TestServiceRowShowsItsTimer(t *testing.T) {
+	m := New(context.Background(), collect.Collector{}, 0)
+	m = update(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = update(m, snapshotMsg{snap: sampleSnapshot()})
+
+	view := m.View().Content
+	if !strings.Contains(view, "next in 20m") {
+		t.Errorf("nightly row should show its next run:\n%s", view)
+	}
+	if !strings.Contains(view, "ran 23h ago") {
+		t.Errorf("nightly row should show when it last ran:\n%s", view)
+	}
+}
+
+func TestOverdueTimerFlagged(t *testing.T) {
+	snap := sampleSnapshot()
+	now := snap.CollectedAt
+	snap.Services[1].Timer = &collect.Timer{Next: now.Add(-5 * time.Minute), NextOK: true}
+
+	m := New(context.Background(), collect.Collector{}, 0)
+	m = update(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = update(m, snapshotMsg{snap: snap})
+
+	if !strings.Contains(m.View().Content, "overdue by 5m") {
+		t.Errorf("overdue timer should be flagged:\n%s", m.View().Content)
 	}
 }
 

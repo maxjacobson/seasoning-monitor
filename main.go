@@ -87,7 +87,6 @@ func printProbe(s collect.Snapshot) {
 		fmt.Printf("temp:      unknown\n")
 	}
 	fmt.Printf("uptime:    %s\n", s.Uptime)
-	fmt.Printf("timer:     %s\n", s.Timer.Summary(s.CollectedAt))
 	for _, svc := range s.Services {
 		state := svc.Result
 		if svc.Missing() {
@@ -95,7 +94,13 @@ func printProbe(s collect.Snapshot) {
 		} else if svc.Running() {
 			state = "running"
 		}
-		fmt.Printf("service:   %-28s %-13s %s (exit %d)\n", svc.Unit, state, svc.ActiveState, svc.ExitStatus)
+		line := fmt.Sprintf("service:   %-28s %-13s %s (exit %d)", svc.Unit, state, svc.ActiveState, svc.ExitStatus)
+		if svc.Timer != nil {
+			if rel := svc.Timer.Relative(s.CollectedAt); rel != "" {
+				line += "  ·  " + rel
+			}
+		}
+		fmt.Println(line)
 	}
 }
 
@@ -119,6 +124,12 @@ func printSummary(s collect.Snapshot) {
 		case svc.OK():
 			status = "ok"
 		}
-		fmt.Printf("  %-7s %-28s %s\n", status, svc.Unit, svc.Result)
+		line := fmt.Sprintf("  %-7s %-28s %s", status, svc.Unit, svc.Result)
+		if svc.Timer != nil {
+			if rel := svc.Timer.Relative(s.CollectedAt); rel != "" {
+				line += "  ·  " + rel
+			}
+		}
+		fmt.Println(line)
 	}
 }

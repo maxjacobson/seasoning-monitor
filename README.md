@@ -12,8 +12,10 @@ diagnostics, so nothing needs to be installed on the Pi.
 - **CPU temperature** (`vcgencmd measure_temp`)
 - **`seasoning*` systemd units** — discovered dynamically, each with its load
   state, active state, and last run result. The Rails app is listed first.
-- **Nightly timer** — a compact `next Sat 00:00 in 22m · last 23h ago`, and it
-  turns amber if the next run is overdue.
+- **Each unit's schedule** — if a timer fires a unit, its row shows when it
+  last ran and when it next will (e.g. `ran 23h ago · next in 17m`), turning
+  amber if the next run is overdue. Timers are matched to the units they
+  activate, so this scales to multiple timers.
 
 Press `enter` on a row to follow its journal live (`journalctl -f`). New lines
 stream in as they are written; the header shows `● live` until the stream ends.
@@ -56,7 +58,9 @@ script and prints `@@SM:<section>@@` delimited output. The script is piped to
 matter. Services are listed with `systemctl list-units 'seasoning*.service'`
 rather than hardcoded names, and each is checked with `LoadState` so a unit
 that isn't installed shows up as missing instead of falsely healthy
-(`systemctl show` reports `Result=success` even for absent units). See
+(`systemctl show` reports `Result=success` even for absent units). Timers come
+from `systemctl list-timers --output=json` and are indexed by the unit they
+activate, so a unit's schedule travels with its row. See
 `internal/collect/collect.go` for the script and parser.
 
 Logs are streamed, not polled: opening a unit starts `journalctl -f` over ssh,

@@ -407,13 +407,6 @@ func (m Model) viewMetrics() string {
 	if m.snap.Uptime != "" {
 		lines = append(lines, metricLine("uptime", m.snap.Uptime, dimStyle))
 	}
-	if m.snap.Timer.NextOK || m.snap.Timer.LastOK {
-		style := dimStyle
-		if m.snap.Timer.Overdue(m.snap.CollectedAt) {
-			style = warnStyle
-		}
-		lines = append(lines, metricLine("timer", m.snap.Timer.Summary(m.snap.CollectedAt), style))
-	}
 	return panelStyle.Render(strings.Join(lines, "\n"))
 }
 
@@ -504,6 +497,15 @@ func (m Model) renderTarget(s collect.Service) string {
 		return fmt.Sprintf(" %s %-22s %s", goodStyle.Render("●"), label, goodStyle.Render("running"))
 	}
 	if s.OK() {
+		if s.Timer != nil {
+			if rel := s.Timer.Relative(m.snap.CollectedAt); rel != "" {
+				style := goodStyle
+				if s.Timer.Overdue(m.snap.CollectedAt) {
+					style = warnStyle
+				}
+				return fmt.Sprintf(" %s %-22s %s", style.Render("●"), label, style.Render("success  ·  "+rel))
+			}
+		}
 		detail := "success"
 		if s.ExitTime != "" {
 			detail += "  " + s.ExitTime
@@ -519,7 +521,11 @@ func (m Model) renderTarget(s collect.Service) string {
 	if s.ExitStatus > 0 {
 		detail = fmt.Sprintf("%s (exit %d)", status, s.ExitStatus)
 	}
-	if s.ExitTime != "" {
+	if s.Timer != nil {
+		if rel := s.Timer.Relative(m.snap.CollectedAt); rel != "" {
+			detail += "  ·  " + rel
+		}
+	} else if s.ExitTime != "" {
 		detail += "  " + dimStyle.Render(s.ExitTime)
 	}
 	return fmt.Sprintf(" %s %-22s %s", badStyle.Render("●"), label, badStyle.Render(detail))
