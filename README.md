@@ -94,4 +94,5 @@ just lint     # gopls warnings (what the editor shows)
 just test     # tests only
 just fmt      # format
 just build    # build the binary
+just install  # install the binary onto PATH
 ```

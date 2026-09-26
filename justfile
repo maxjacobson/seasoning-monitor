@@ -11,6 +11,10 @@ list:
 build:
     go build -o seasoning-monitor .
 
+# Install the binary into $GOBIN (usually ~/go/bin) so it runs from anywhere.
+install:
+    go install .
+
 # Run the interactive TUI.
 run:
     go run .
