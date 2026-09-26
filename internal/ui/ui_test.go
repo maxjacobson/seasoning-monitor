@@ -139,6 +139,27 @@ func TestStatsPanelShowsError(t *testing.T) {
 	}
 }
 
+func TestStatsColourReflectsHealth(t *testing.T) {
+	snap := sampleSnapshot()
+
+	healthy := New(context.Background(), collect.Collector{}, 0, 0)
+	healthy = update(healthy, snapshotMsg{snap: snap})
+	healthy = withStats(healthy)
+	if !strings.Contains(healthy.View().Content, "38;5;42") {
+		t.Errorf("healthy stats should render green:\n%q", healthy.View().Content)
+	}
+
+	broken := New(context.Background(), collect.Collector{}, 0, 0)
+	broken = update(broken, snapshotMsg{snap: snap})
+	s := sampleStats()
+	s.Traffic.S5xx = 3
+	s.Backup.At = snap.CollectedAt.Add(-40 * time.Hour)
+	broken = update(broken, statsMsg{stats: s})
+	if !strings.Contains(broken.View().Content, "38;5;203") {
+		t.Errorf("unhealthy stats should render red:\n%q", broken.View().Content)
+	}
+}
+
 func TestStaleBackupFlagged(t *testing.T) {
 	m := New(context.Background(), collect.Collector{}, 0, 0)
 	snap := sampleSnapshot()

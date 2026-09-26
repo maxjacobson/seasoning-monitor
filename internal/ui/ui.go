@@ -460,7 +460,7 @@ func (m Model) viewMetrics() string {
 	lines = append(lines, metricLine("load", m.loadText(), m.loadStyle()))
 	lines = append(lines, metricLine("temp", m.tempText(), m.tempStyle()))
 	if m.snap.Uptime != "" {
-		lines = append(lines, metricLine("uptime", m.snap.Uptime, dimStyle))
+		lines = append(lines, metricLine("uptime", m.snap.Uptime, goodStyle))
 	}
 	return panelStyle.Render(strings.Join(lines, "\n"))
 }
@@ -476,14 +476,15 @@ func (m Model) viewStats() string {
 	t := m.stats.Traffic
 	now := m.snap.CollectedAt
 
-	var lines []string
-	lines = append(lines, statsLine("traffic", humanCount(t.Requests)+" requests (24h)", dimStyle))
-	breakdown := fmt.Sprintf("2xx %d · 3xx %d · 4xx %d · 5xx %d", t.S2xx, t.S3xx, t.S4xx, t.S5xx)
-	breakdownStyle := dimStyle
+	trafficStyle := goodStyle
 	if t.S5xx > 0 {
-		breakdownStyle = badStyle
+		trafficStyle = badStyle
 	}
-	lines = append(lines, statsLine("", breakdown, breakdownStyle))
+
+	var lines []string
+	lines = append(lines, statsLine("traffic", humanCount(t.Requests)+" requests (24h)", trafficStyle))
+	breakdown := fmt.Sprintf("2xx %d · 3xx %d · 4xx %d · 5xx %d", t.S2xx, t.S3xx, t.S4xx, t.S5xx)
+	lines = append(lines, statsLine("", breakdown, trafficStyle))
 
 	failedValue := "0 units"
 	failedStyle := goodStyle
@@ -495,7 +496,9 @@ func (m Model) viewStats() string {
 
 	if m.stats.Database.OK {
 		value := fmt.Sprintf("%s · %d conns", m.stats.Database.Size, m.stats.Database.Connections)
-		lines = append(lines, statsLine("postgres", value, dimStyle))
+		lines = append(lines, statsLine("postgres", value, goodStyle))
+	} else {
+		lines = append(lines, statsLine("postgres", "unavailable", badStyle))
 	}
 
 	lines = append(lines, statsLine("backup", m.backupText(now), m.backupStyle(now)))
