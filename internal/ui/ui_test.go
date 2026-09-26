@@ -139,6 +139,31 @@ func TestStatsPanelShowsError(t *testing.T) {
 	}
 }
 
+func TestProgressBarFollowsWork(t *testing.T) {
+	m := New(context.Background(), collect.Collector{}, 0, 0)
+	if m.View().ProgressBar == nil {
+		t.Errorf("expected a progress bar during the initial load")
+	}
+
+	m = update(m, snapshotMsg{snap: sampleSnapshot()})
+	m = update(m, statsMsg{stats: sampleStats()})
+	if m.View().ProgressBar != nil {
+		t.Errorf("expected no progress bar when idle")
+	}
+
+	// Reopening a log stream counts as work until the stream starts.
+	m = update(m, snapshotMsg{snap: sampleSnapshot()})
+	m, _ = updateCmd(m, key(tea.Key{Code: tea.KeyEnter}))
+	if m.View().ProgressBar == nil {
+		t.Errorf("expected a progress bar while connecting the log stream")
+	}
+
+	m = update(m, logStreamStartMsg{unit: "seasoning.service", gen: m.logGen, ch: make(chan string), cancel: func() {}})
+	if m.View().ProgressBar != nil {
+		t.Errorf("expected no progress bar once the stream is live")
+	}
+}
+
 func TestStatsColourReflectsHealth(t *testing.T) {
 	snap := sampleSnapshot()
 

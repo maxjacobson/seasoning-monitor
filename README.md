@@ -54,7 +54,12 @@ The summary reloads itself every few seconds (see `--refresh`), showing a
 | `g` / `G`   | jump to top / bottom (follow)   |
 | `enter`     | follow logs for the selected unit |
 | `esc`       | back to the summary             |
-| `r`         | refresh (or restart the log stream) || `q`         | quit                            |
+| `r`         | refresh (or restart the log stream) |
+| `q`         | quit                            |
+
+The terminal's native progress bar (`OSC 9;4`) appears while data is loading and
+clears when it's idle. Ghostty 1.2+ draws it; unsupported terminals just ignore
+the sequence.
 
 ## How it works
 

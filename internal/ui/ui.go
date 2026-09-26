@@ -409,7 +409,28 @@ func (m Model) View() tea.View {
 	}
 	v := tea.NewView(content)
 	v.AltScreen = true
+	v.ProgressBar = m.progressBar()
 	return v
+}
+
+// busy reports whether any background work is in flight.
+func (m Model) busy() bool {
+	if m.loading || m.statsLoading {
+		return true
+	}
+	// Opening or restarting a log stream counts as connecting until the
+	// stream reports back.
+	return m.mode == modeLogs && !m.logStreamOn && m.logErr == nil
+}
+
+// progressBar drives the terminal's native progress indicator (OSC 9;4, shown
+// by Ghostty 1.2+ and others). It is indeterminate, and nil when idle so the
+// bar clears.
+func (m Model) progressBar() *tea.ProgressBar {
+	if !m.busy() {
+		return nil
+	}
+	return tea.NewProgressBar(tea.ProgressBarIndeterminate, 0)
 }
 
 func (m Model) viewSummary() string {
