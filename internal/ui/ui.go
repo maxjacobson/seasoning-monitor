@@ -20,6 +20,8 @@ const (
 	modeLogs
 )
 
+const scrollStep = 8
+
 var (
 	titleStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205"))
 	labelStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
@@ -30,13 +32,6 @@ var (
 	selectedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("231")).Background(lipgloss.Color("238"))
 	panelStyle    = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
 )
-
-type target struct {
-	label string
-	unit  string
-	svc   collect.Service
-	isApp bool
-}
 
 // Model is the bubbletea model for the monitor.
 type Model struct {
@@ -56,7 +51,8 @@ type Model struct {
 	logText    string
 	logErr     error
 	logLoading bool
-	logScroll  int
+	logY       int
+	logX       int
 }
 
 // New builds a Model bound to the given collector.
@@ -112,15 +108,6 @@ func (m Model) Init() tea.Cmd {
 	return tea.Batch(m.load(), m.tick())
 }
 
-func (m Model) targets() []target {
-	ts := make([]target, 0, len(m.snap.Services)+1)
-	ts = append(ts, target{label: "rails app", unit: "seasoning", svc: m.snap.App, isApp: true})
-	for _, s := range m.snap.Services {
-		ts = append(ts, target{label: s.Name, unit: "seasoning-" + s.Name, svc: s})
-	}
-	return ts
-}
-
 // Update handles messages.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -134,8 +121,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err == nil {
 			m.snap = msg.snap
 		}
-		if n := len(m.targets()); m.selected >= n {
+		if n := len(m.snap.Services); m.selected >= n {
 			m.selected = n - 1
+			if m.selected < 0 {
+				m.selected = 0
+			}
 		}
 		return m, nil
 
@@ -143,7 +133,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.logLoading = false
 		m.logText = msg.text
 		m.logErr = msg.err
-		m.logScroll = 0
+		m.logY = 0
+		m.logX = 0
 		return m, nil
 
 	case tickMsg:
@@ -166,15 +157,24 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case "q", "esc", "backspace":
 			m.mode = modeSummary
 		case "up", "k":
-			if m.logScroll > 0 {
-				m.logScroll--
+			if m.logY > 0 {
+				m.logY--
 			}
 		case "down", "j":
-			m.logScroll++
+			m.logY++
+		case "left", "h":
+			if m.logX >= scrollStep {
+				m.logX -= scrollStep
+			} else {
+				m.logX = 0
+			}
+		case "right", "l":
+			m.logX += scrollStep
 		case "r":
 			m.logLoading = true
 			return m, m.loadLogs(m.logUnit)
 		}
+		m.clampLog()
 		return m, nil
 	}
 
@@ -189,21 +189,22 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.selected--
 		}
 	case "down", "j":
-		if m.selected < len(m.targets())-1 {
+		if m.selected < len(m.snap.Services)-1 {
 			m.selected++
 		}
 	case "enter":
-		ts := m.targets()
-		if len(ts) == 0 {
+		if len(m.snap.Services) == 0 {
 			return m, nil
 		}
-		t := ts[m.selected]
+		unit := m.snap.Services[m.selected].Unit
 		m.mode = modeLogs
-		m.logUnit = t.unit
+		m.logUnit = unit
 		m.logText = ""
 		m.logErr = nil
+		m.logY = 0
+		m.logX = 0
 		m.logLoading = true
-		return m, m.loadLogs(t.unit)
+		return m, m.loadLogs(unit)
 	}
 	return m, nil
 }
@@ -242,8 +243,12 @@ func (m Model) viewSummary() string {
 	b.WriteString(labelStyle.Render("services"))
 	b.WriteString("\n")
 
-	for i, t := range m.targets() {
-		line := m.renderTarget(t)
+	if len(m.snap.Services) == 0 {
+		b.WriteString(dimStyle.Render("  (none found)"))
+		b.WriteString("\n")
+	}
+	for i, s := range m.snap.Services {
+		line := m.renderTarget(s)
 		if i == m.selected {
 			line = selectedStyle.Render(line)
 		}
@@ -348,34 +353,35 @@ func (m Model) tempStyle() lipgloss.Style {
 	}
 }
 
-func (m Model) renderTarget(t target) string {
-	dot := dimStyle.Render("●")
-	if t.isApp {
-		if t.svc.ActiveState == "active" {
-			dot = goodStyle.Render("●")
-		} else if t.svc.ActiveState != "" && t.svc.ActiveState != "unknown" {
-			dot = badStyle.Render("●")
+func (m Model) renderTarget(s collect.Service) string {
+	label := s.Label()
+
+	if s.Missing() {
+		return fmt.Sprintf(" %s %-22s %s", dimStyle.Render("●"), label, dimStyle.Render("not installed"))
+	}
+	if s.Running() {
+		return fmt.Sprintf(" %s %-22s %s", goodStyle.Render("●"), label, goodStyle.Render("running"))
+	}
+	if s.OK() {
+		detail := "success"
+		if s.ExitTime != "" {
+			detail += "  " + s.ExitTime
 		}
-		return fmt.Sprintf(" %s %-22s %s", dot, t.label, dimStyle.Render(t.svc.ActiveState))
+		return fmt.Sprintf(" %s %-22s %s", goodStyle.Render("●"), label, goodStyle.Render(detail))
 	}
 
-	status := t.svc.Result
+	status := s.Result
 	if status == "" {
 		status = "unknown"
 	}
-	if t.svc.OK() {
-		dot = goodStyle.Render("●")
-		return fmt.Sprintf(" %s %-22s %s", dot, t.label, goodStyle.Render(status))
-	}
-	dot = badStyle.Render("●")
 	detail := status
-	if t.svc.ExitStatus >= 0 {
-		detail = fmt.Sprintf("%s (exit %d)", status, t.svc.ExitStatus)
+	if s.ExitStatus > 0 {
+		detail = fmt.Sprintf("%s (exit %d)", status, s.ExitStatus)
 	}
-	if t.svc.ExitTime != "" {
-		detail += "  " + dimStyle.Render(t.svc.ExitTime)
+	if s.ExitTime != "" {
+		detail += "  " + dimStyle.Render(s.ExitTime)
 	}
-	return fmt.Sprintf(" %s %-22s %s", dot, t.label, badStyle.Render(detail))
+	return fmt.Sprintf(" %s %-22s %s", badStyle.Render("●"), label, badStyle.Render(detail))
 }
 
 func (m Model) viewLogs() string {
@@ -384,32 +390,32 @@ func (m Model) viewLogs() string {
 	if m.logLoading {
 		b.WriteString(dimStyle.Render("  loading..."))
 	}
+	if m.logX > 0 {
+		b.WriteString(dimStyle.Render(fmt.Sprintf("  col %d+", m.logX)))
+	}
 	b.WriteString("\n\n")
 
+	lines := m.logLines()
 	switch {
 	case m.logErr != nil:
 		b.WriteString(badStyle.Render("error: " + m.logErr.Error()))
-	case m.logText == "":
-		b.WriteString(dimStyle.Render("(no output)"))
+	case len(lines) == 0:
+		b.WriteString(dimStyle.Render("(no entries)"))
 	default:
-		lines := strings.Split(strings.TrimRight(m.logText, "\n"), "\n")
 		visible := m.height - 6
 		if visible < 1 {
 			visible = 20
 		}
-		start := m.logScroll
+		start := m.logY
 		if start > len(lines)-1 {
 			start = len(lines) - 1
-		}
-		if start < 0 {
-			start = 0
 		}
 		end := start + visible
 		if end > len(lines) {
 			end = len(lines)
 		}
 		for _, line := range lines[start:end] {
-			b.WriteString(line)
+			b.WriteString(m.sliceLine(line))
 			b.WriteString("\n")
 		}
 		if end < len(lines) {
@@ -419,8 +425,64 @@ func (m Model) viewLogs() string {
 	}
 
 	b.WriteString("\n")
-	b.WriteString(dimStyle.Render("j/k scroll  r reload  esc back  q quit"))
+	b.WriteString(dimStyle.Render("j/k scroll  h/l pan  r reload  esc back  q quit"))
 	return b.String()
+}
+
+func (m Model) logLines() []string {
+	if strings.TrimSpace(m.logText) == "" {
+		return nil
+	}
+	if strings.Contains(m.logText, "-- No entries --") {
+		return nil
+	}
+	return strings.Split(strings.TrimRight(m.logText, "\n"), "\n")
+}
+
+// sliceLine applies the current horizontal offset and clips to the viewport.
+func (m Model) sliceLine(line string) string {
+	runes := []rune(line)
+	if m.logX >= len(runes) {
+		return ""
+	}
+	runes = runes[m.logX:]
+
+	width := m.width
+	if width <= 0 {
+		width = 200
+	}
+	if len(runes) > width {
+		runes = runes[:width]
+	}
+	return string(runes)
+}
+
+// clampLog keeps the vertical and horizontal offsets inside the content.
+func (m *Model) clampLog() {
+	lines := m.logLines()
+	if len(lines) == 0 {
+		m.logY, m.logX = 0, 0
+		return
+	}
+	if m.logY > len(lines)-1 {
+		m.logY = len(lines) - 1
+	}
+	if m.logY < 0 {
+		m.logY = 0
+	}
+
+	maxWidth := 0
+	for _, line := range lines {
+		if w := len([]rune(line)); w > maxWidth {
+			maxWidth = w
+		}
+	}
+	if m.logX > maxWidth {
+		m.logX = maxWidth
+	}
+	if m.logX < 0 {
+		m.logX = 0
+	}
 }
 
 func threshold(value, warn, bad int) lipgloss.Style {

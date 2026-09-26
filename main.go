@@ -20,11 +20,38 @@ func main() {
 	host := flag.String("host", "pi", "ssh host to query")
 	probe := flag.Bool("probe", false, "print a snapshot as plain text and exit")
 	once := flag.Bool("once", false, "print a rendered summary once and exit")
+	logs := flag.String("logs", "", "print journal for a unit (e.g. seasoning-prune) and exit")
+	lines := flag.Int("lines", 300, "number of journal lines to fetch with --logs")
+	execCmd := flag.String("exec", "", "run an arbitrary read-only shell command over ssh and exit")
 	timeout := flag.Duration("timeout", 30*time.Second, "per-command timeout")
 	flag.Parse()
 
 	ctx := context.Background()
 	collector := collect.Collector{Runner: pi.SSHRunner{Host: *host}}
+
+	if *execCmd != "" {
+		ctx, cancel := context.WithTimeout(ctx, *timeout)
+		defer cancel()
+		out, err := collector.Runner.Run(ctx, *execCmd)
+		fmt.Print(out)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	if *logs != "" {
+		ctx, cancel := context.WithTimeout(ctx, *timeout)
+		defer cancel()
+		out, err := collector.Logs(ctx, *logs, *lines)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		fmt.Print(out)
+		return
+	}
 
 	if *probe || *once {
 		ctx, cancel := context.WithTimeout(ctx, *timeout)
@@ -61,9 +88,14 @@ func printProbe(s collect.Snapshot) {
 	}
 	fmt.Printf("uptime:    %s\n", s.Uptime)
 	fmt.Printf("timer:     %s\n", strings.Join(strings.Fields(s.Timer), " "))
-	fmt.Printf("app:       %s\n", s.App.ActiveState)
 	for _, svc := range s.Services {
-		fmt.Printf("service:   %-22s %s (exit %d)\n", svc.Name, svc.Result, svc.ExitStatus)
+		state := svc.Result
+		if svc.Missing() {
+			state = "not installed"
+		} else if svc.Running() {
+			state = "running"
+		}
+		fmt.Printf("service:   %-28s %-13s %s (exit %d)\n", svc.Unit, state, svc.ActiveState, svc.ExitStatus)
 	}
 }
 
@@ -77,12 +109,16 @@ func printSummary(s collect.Snapshot) {
 	if s.TempOK {
 		fmt.Printf("  temp   %.1fC\n", s.TempC)
 	}
-	fmt.Printf("  app    %s\n", s.App.ActiveState)
 	for _, svc := range s.Services {
 		status := "FAIL"
-		if svc.OK() {
+		switch {
+		case svc.Missing():
+			status = "MISSING"
+		case svc.Running():
+			status = "running"
+		case svc.OK():
 			status = "ok"
 		}
-		fmt.Printf("  %-6s %-22s %s\n", status, svc.Name, svc.Result)
+		fmt.Printf("  %-7s %-28s %s\n", status, svc.Unit, svc.Result)
 	}
 }

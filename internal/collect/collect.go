@@ -4,6 +4,7 @@ package collect
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -11,18 +12,10 @@ import (
 	"github.com/maxjacobson/seasoning-monitor/internal/pi"
 )
 
-// ServiceNames are the nightly systemd services defined in Seasoning's
-// PRODUCTION.md. Each runs as its own oneshot service.
-var ServiceNames = []string{
-	"prune",
-	"tmdb-refresh-config",
-	"tmdb-refresh-shows",
-	"new-season-checker",
-	"trim-sessions",
-	"backup-db",
-}
-
-const sectionPrefix = "@@SM:"
+const (
+	sectionPrefix = "@@SM:"
+	appUnit       = "seasoning.service"
+)
 
 // Snapshot is a point-in-time health reading of the Seasoning host.
 type Snapshot struct {
@@ -34,7 +27,6 @@ type Snapshot struct {
 	TempOK      bool
 	Uptime      string
 	Timer       string
-	App         Service
 	Services    []Service
 }
 
@@ -60,18 +52,47 @@ type Load struct {
 	NProc   int
 }
 
-// Service is the last known state of a nightly task.
+// Service is the observed state of a `seasoning*` systemd unit.
 type Service struct {
-	Name        string
+	Unit        string
+	LoadState   string
 	ActiveState string
 	Result      string
 	ExitStatus  int
 	ExitTime    string
 }
 
-// OK reports whether the service's last run succeeded.
+// Label is the unit name without its `.service` suffix.
+func (s Service) Label() string {
+	return strings.TrimSuffix(s.Unit, ".service")
+}
+
+// IsApp reports whether this is the long-running Rails application unit.
+func (s Service) IsApp() bool {
+	return s.Unit == appUnit
+}
+
+// Missing reports whether the unit isn't installed on the host. This matters
+// because `systemctl show` reports Result=success even for absent units, which
+// would otherwise look healthy.
+func (s Service) Missing() bool {
+	return s.LoadState != "loaded"
+}
+
+// Running reports whether the unit is currently active.
+func (s Service) Running() bool {
+	return s.ActiveState == "active" || s.ActiveState == "activating"
+}
+
+// OK reports whether the unit is healthily running or last completed cleanly.
 func (s Service) OK() bool {
-	return s.Result == "success" && (s.ExitStatus == 0)
+	if s.Missing() {
+		return false
+	}
+	if s.Running() {
+		return true
+	}
+	return s.Result == "success" && s.ExitStatus == 0
 }
 
 // Collector produces snapshots and logs from a Runner.
@@ -107,16 +128,15 @@ echo '@@SM:NPROC@@'; nproc
 echo '@@SM:TEMP@@'; vcgencmd measure_temp 2>/dev/null || echo 'temp=N/A'
 echo '@@SM:UPTIME@@'; uptime -p 2>/dev/null || uptime
 echo '@@SM:TIMER@@'; systemctl list-timers seasoning-nightly.timer --no-pager --no-legend 2>/dev/null || true
-echo '@@SM:SVC:app@@'
-systemctl show seasoning -p ActiveState -p Result -p ExecMainStatus -p ExecMainExitTimestamp 2>/dev/null || true
-for s in prune tmdb-refresh-config tmdb-refresh-shows new-season-checker trim-sessions backup-db; do
-  echo "@@SM:SVC:$s@@"
-  systemctl show "seasoning-$s" -p ActiveState -p Result -p ExecMainStatus -p ExecMainExitTimestamp 2>/dev/null || true
+for u in $(systemctl list-units --all --no-legend --no-pager 'seasoning*.service' | awk '$1 ~ /^seasoning.*\.service$/ {print $1}'); do
+  echo "@@SM:SVC:$u@@"
+  systemctl show "$u" -p LoadState -p ActiveState -p Result -p ExecMainStatus -p ExecMainExitTimestamp 2>/dev/null || true
 done`
 
 type sections struct {
-	plain map[string]string
-	svcs  map[string]map[string]string
+	plain   map[string]string
+	svcs    map[string]map[string]string
+	svcList []string
 }
 
 func parseSections(out string) sections {
@@ -131,6 +151,7 @@ func parseSections(out string) sections {
 		body := strings.TrimSpace(strings.Join(buf, "\n"))
 		if name, ok := strings.CutPrefix(current, "SVC:"); ok {
 			s.svcs[name] = parseKV(body)
+			s.svcList = append(s.svcList, name)
 		} else {
 			s.plain[current] = body
 		}
@@ -182,21 +203,33 @@ func parseSnapshot(out string, now time.Time) (Snapshot, error) {
 	snap.Mem = parseMem(s.plain["MEM"])
 	snap.Load = parseLoad(s.plain["LOAD"], s.plain["NPROC"])
 	snap.TempC, snap.TempOK = parseTemp(s.plain["TEMP"])
-	snap.App = serviceFromKV("app", s.svcs["app"])
 
-	for _, name := range ServiceNames {
-		snap.Services = append(snap.Services, serviceFromKV(name, s.svcs[name]))
+	for _, unit := range s.svcList {
+		snap.Services = append(snap.Services, serviceFromKV(unit, s.svcs[unit]))
 	}
+	sortServices(snap.Services)
 	return snap, nil
 }
 
-func serviceFromKV(name string, kv map[string]string) Service {
+// sortServices puts the Rails app first, then the rest alphabetically.
+func sortServices(services []Service) {
+	sort.SliceStable(services, func(i, j int) bool {
+		ai, aj := services[i].IsApp(), services[j].IsApp()
+		if ai != aj {
+			return ai
+		}
+		return services[i].Unit < services[j].Unit
+	})
+}
+
+func serviceFromKV(unit string, kv map[string]string) Service {
 	if kv == nil {
-		return Service{Name: name, ActiveState: "unknown", Result: "unknown", ExitStatus: -1}
+		return Service{Unit: unit, LoadState: "not-found", ActiveState: "unknown", Result: "unknown", ExitStatus: -1}
 	}
 	exit, _ := strconv.Atoi(kv["ExecMainStatus"])
 	return Service{
-		Name:        name,
+		Unit:        unit,
+		LoadState:   kv["LoadState"],
 		ActiveState: kv["ActiveState"],
 		Result:      kv["Result"],
 		ExitStatus:  exit,

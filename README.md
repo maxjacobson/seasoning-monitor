@@ -10,19 +10,20 @@ diagnostics, so nothing needs to be installed on the Pi.
 - **Memory** usage
 - **Load average** and CPU count
 - **CPU temperature** (`vcgencmd measure_temp`)
-- **Rails app** service state
-- **Nightly tasks** — last run result and exit code for each
-  `seasoning-*` service, from `systemctl show`
+- **`seasoning*` systemd units** — discovered dynamically, each with its load
+  state, active state, and last run result. The Rails app is listed first.
 
 Press `enter` on a row to read its journal (`journalctl -u <unit>`).
 
 ## Usage
 
 ```sh
-go run .            # interactive TUI
-go run . --probe    # raw snapshot as plain text, then exit
-go run . --once     # one rendered summary, then exit
-go run . --host pi  # override the ssh host (default: pi)
+go run .                          # interactive TUI
+go run . --probe                  # raw snapshot as plain text, then exit
+go run . --once                   # one rendered summary, then exit
+go run . --logs seasoning-nightly # journal for a unit, then exit
+go run . --exec 'df -h'           # run a read-only command over ssh, then exit
+go run . --host pi                # override the ssh host (default: pi)
 ```
 
 ### Keys
@@ -30,6 +31,7 @@ go run . --host pi  # override the ssh host (default: pi)
 | Key         | Action                          |
 | ----------- | ------------------------------- |
 | `j` / `k`   | move selection (or scroll logs) |
+| `h` / `l`   | pan logs left/right             |
 | `enter`     | open logs for the selected unit |
 | `esc`       | back to the summary             |
 | `r`         | refresh now                     |
@@ -40,7 +42,11 @@ go run . --host pi  # override the ssh host (default: pi)
 Everything is gathered in a single `ssh` call that runs one batched shell
 script and prints `@@SM:<section>@@` delimited output. The script is piped to
 `sh` on the remote side over stdin, so the Pi's login shell (fish) doesn't
-matter. See `internal/collect/collect.go` for the script and parser.
+matter. Services are listed with `systemctl list-units 'seasoning*.service'`
+rather than hardcoded names, and each is checked with `LoadState` so a unit
+that isn't installed shows up as missing instead of falsely healthy
+(`systemctl show` reports `Result=success` even for absent units). See
+`internal/collect/collect.go` for the script and parser.
 
 ## Development
 

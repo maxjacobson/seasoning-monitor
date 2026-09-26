@@ -21,43 +21,25 @@ temp=48.3'C
 @@SM:UPTIME@@
 up 3 days, 4 hours
 @@SM:TIMER@@
-NEXT                        LEFT       LAST                        PASSED  UNIT                     ACTIVATES
-Thu 2026-09-25 00:00:00 EDT 5h left    Wed 2026-09-24 00:00:00 EDT 18h ago seasoning-nightly.timer seasoning-nightly.target
-@@SM:SVC:app@@
+Sat 2026-09-26 00:00:00 EDT 43min Fri 2026-09-25 00:00:07 EDT 23h ago seasoning-nightly.timer seasoning-nightly.service
+@@SM:SVC:seasoning-nightly.service@@
+LoadState=loaded
+ActiveState=inactive
+Result=success
+ExecMainStatus=0
+ExecMainExitTimestamp=Fri 2026-09-25 00:02:06 EDT
+@@SM:SVC:seasoning.service@@
+LoadState=loaded
 ActiveState=active
 Result=success
 ExecMainStatus=0
 ExecMainExitTimestamp=
-@@SM:SVC:prune@@
+@@SM:SVC:seasoning-prune.service@@
+LoadState=not-found
 ActiveState=inactive
 Result=success
 ExecMainStatus=0
-ExecMainExitTimestamp=Wed 2026-09-24 00:00:01 EDT
-@@SM:SVC:tmdb-refresh-config@@
-ActiveState=inactive
-Result=success
-ExecMainStatus=0
-ExecMainExitTimestamp=Wed 2026-09-24 00:00:03 EDT
-@@SM:SVC:tmdb-refresh-shows@@
-ActiveState=inactive
-Result=success
-ExecMainStatus=0
-ExecMainExitTimestamp=Wed 2026-09-24 00:00:05 EDT
-@@SM:SVC:new-season-checker@@
-ActiveState=failed
-Result=failed
-ExecMainStatus=1
-ExecMainExitTimestamp=Wed 2026-09-24 00:00:07 EDT
-@@SM:SVC:trim-sessions@@
-ActiveState=inactive
-Result=success
-ExecMainStatus=0
-ExecMainExitTimestamp=Wed 2026-09-24 00:00:09 EDT
-@@SM:SVC:backup-db@@
-ActiveState=inactive
-Result=success
-ExecMainStatus=0
-ExecMainExitTimestamp=Wed 2026-09-24 00:00:11 EDT
+ExecMainExitTimestamp=
 `
 
 func TestParseSnapshot(t *testing.T) {
@@ -82,29 +64,44 @@ func TestParseSnapshot(t *testing.T) {
 	if snap.Uptime != "up 3 days, 4 hours" {
 		t.Errorf("uptime = %q", snap.Uptime)
 	}
-	if snap.App.ActiveState != "active" || !snap.App.OK() {
-		t.Errorf("app = %+v", snap.App)
+
+	if len(snap.Services) != 3 {
+		t.Fatalf("got %d services, want 3", len(snap.Services))
+	}
+	// The app must be sorted first.
+	if snap.Services[0].Unit != "seasoning.service" || !snap.Services[0].IsApp() {
+		t.Errorf("first service = %+v", snap.Services[0])
+	}
+	if !snap.Services[0].Running() || !snap.Services[0].OK() {
+		t.Errorf("app should be running and ok: %+v", snap.Services[0])
+	}
+	if snap.Services[0].Label() != "seasoning" {
+		t.Errorf("app label = %q", snap.Services[0].Label())
 	}
 
-	if len(snap.Services) != len(ServiceNames) {
-		t.Fatalf("got %d services, want %d", len(snap.Services), len(ServiceNames))
+	nightly := snap.Services[1]
+	if nightly.Unit != "seasoning-nightly.service" || !nightly.OK() {
+		t.Errorf("nightly = %+v", nightly)
 	}
-	byName := map[string]Service{}
-	for _, s := range snap.Services {
-		byName[s.Name] = s
+	if nightly.ExitTime != "Fri 2026-09-25 00:02:06 EDT" {
+		t.Errorf("nightly exit time = %q", nightly.ExitTime)
 	}
-	if !byName["prune"].OK() {
-		t.Errorf("prune should be ok: %+v", byName["prune"])
+}
+
+func TestMissingUnitIsNotOK(t *testing.T) {
+	snap, err := parseSnapshot(sampleOutput, time.Now())
+	if err != nil {
+		t.Fatalf("parseSnapshot: %v", err)
 	}
-	failed, ok := byName["new-season-checker"]
-	if !ok {
-		t.Fatal("missing new-season-checker")
+	prune := snap.Services[2]
+	if prune.Unit != "seasoning-prune.service" {
+		t.Fatalf("third service = %+v", prune)
 	}
-	if failed.OK() || failed.ExitStatus != 1 || failed.Result != "failed" {
-		t.Errorf("new-season-checker = %+v", failed)
+	if !prune.Missing() {
+		t.Errorf("prune should be reported missing: %+v", prune)
 	}
-	if failed.ExitTime != "Wed 2026-09-24 00:00:07 EDT" {
-		t.Errorf("exit time = %q", failed.ExitTime)
+	if prune.OK() {
+		t.Errorf("a unit that is not installed must never be OK: %+v", prune)
 	}
 }
 
@@ -119,13 +116,8 @@ func TestParseSnapshotHandlesMissingSections(t *testing.T) {
 	if snap.TempOK {
 		t.Errorf("expected temp unknown")
 	}
-	if len(snap.Services) != len(ServiceNames) {
-		t.Fatalf("got %d services, want %d", len(snap.Services), len(ServiceNames))
-	}
-	for _, s := range snap.Services {
-		if s.OK() {
-			t.Errorf("missing service should not be ok: %+v", s)
-		}
+	if len(snap.Services) != 0 {
+		t.Errorf("expected no services, got %+v", snap.Services)
 	}
 }
 
@@ -165,7 +157,7 @@ func TestSectionMarker(t *testing.T) {
 		match bool
 	}{
 		{"@@SM:DISK@@", "DISK", true},
-		{"@@SM:SVC:prune@@", "SVC:prune", true},
+		{"@@SM:SVC:seasoning-prune.service@@", "SVC:seasoning-prune.service", true},
 		{"  @@SM:MEM@@  ", "MEM", true},
 		{"plain output", "", false},
 		{"@@SM:MISSING", "", false},
