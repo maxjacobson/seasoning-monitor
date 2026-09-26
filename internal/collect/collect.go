@@ -31,6 +31,11 @@ type Snapshot struct {
 	Services    []Service
 }
 
+// TempF returns the CPU temperature in degrees Fahrenheit.
+func (s Snapshot) TempF() float64 {
+	return s.TempC*9/5 + 32
+}
+
 // Disk is filesystem usage for the root mount.
 type Disk struct {
 	Percent int

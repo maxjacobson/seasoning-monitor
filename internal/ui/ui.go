@@ -649,7 +649,7 @@ func (m Model) tempText() string {
 	if !m.snap.TempOK {
 		return "unknown"
 	}
-	return fmt.Sprintf("%.1fC", m.snap.TempC)
+	return fmt.Sprintf("%.1fF", m.snap.TempF())
 }
 
 func (m Model) tempStyle() lipgloss.Style {

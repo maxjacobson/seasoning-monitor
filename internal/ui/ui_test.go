@@ -213,7 +213,7 @@ func TestSummaryShowsHealth(t *testing.T) {
 	m = update(m, snapshotMsg{snap: sampleSnapshot()})
 
 	view := m.View().Content
-	for _, want := range []string{"12% used", "48.3C", "seasoning-nightly", "running", "not installed"} {
+	for _, want := range []string{"12% used", "118.9F", "seasoning-nightly", "running", "not installed"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("summary missing %q\n%s", want, view)
 		}

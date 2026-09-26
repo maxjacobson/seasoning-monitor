@@ -85,7 +85,7 @@ func printProbe(s collect.Snapshot, stats collect.Stats, statsErr error) {
 	fmt.Printf("mem:       %d/%d MB used, %d MB available\n", s.Mem.UsedMB, s.Mem.TotalMB, s.Mem.AvailableMB)
 	fmt.Printf("load:      %.2f %.2f %.2f across %d cpus\n", s.Load.One, s.Load.Five, s.Load.Fifteen, s.Load.NProc)
 	if s.TempOK {
-		fmt.Printf("temp:      %.1fC\n", s.TempC)
+		fmt.Printf("temp:      %.1fF\n", s.TempF())
 	} else {
 		fmt.Printf("temp:      unknown\n")
 	}
@@ -139,7 +139,7 @@ func printSummary(s collect.Snapshot, stats collect.Stats, statsErr error) {
 	}
 	fmt.Printf("  load   %.2f %.2f %.2f (%d cpus)\n", s.Load.One, s.Load.Five, s.Load.Fifteen, s.Load.NProc)
 	if s.TempOK {
-		fmt.Printf("  temp   %.1fC\n", s.TempC)
+		fmt.Printf("  temp   %.1fF\n", s.TempF())
 	}
 	for _, svc := range s.Services {
 		status := "FAIL"
