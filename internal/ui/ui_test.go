@@ -33,6 +33,11 @@ func update(m Model, msg tea.Msg) Model {
 	return next.(Model)
 }
 
+func updateCmd(m Model, msg tea.Msg) (Model, tea.Cmd) {
+	next, cmd := m.Update(msg)
+	return next.(Model), cmd
+}
+
 func key(k tea.Key) tea.Msg { return tea.KeyPressMsg(k) }
 
 // withLogs simulates an open follow stream that has already delivered lines.
@@ -48,8 +53,47 @@ func withLogs(m Model, unit string, lines ...string) Model {
 	return m
 }
 
+func TestRefreshInterval(t *testing.T) {
+	if got := New(context.Background(), collect.Collector{}, 0).refreshEvery; got != defaultRefresh {
+		t.Errorf("default refresh = %v, want %v", got, defaultRefresh)
+	}
+	if got := New(context.Background(), collect.Collector{}, time.Minute).refreshEvery; got != time.Minute {
+		t.Errorf("custom refresh = %v, want 1m", got)
+	}
+}
+
+func TestTickReloadsWhenIdle(t *testing.T) {
+	m := New(context.Background(), collect.Collector{}, 0)
+	m = update(m, snapshotMsg{snap: sampleSnapshot()})
+	if m.loading {
+		t.Fatalf("model should be idle after a snapshot")
+	}
+
+	m, cmd := updateCmd(m, tickMsg(time.Now()))
+	if cmd == nil {
+		t.Fatalf("tick should schedule a reload")
+	}
+	if !m.loading {
+		t.Errorf("a tick should mark the model as loading")
+	}
+}
+
+func TestTickSkipsWhileLoading(t *testing.T) {
+	m := New(context.Background(), collect.Collector{}, 0)
+	if !m.loading {
+		t.Fatalf("a fresh model starts loading")
+	}
+	m, cmd := updateCmd(m, tickMsg(time.Now()))
+	if cmd == nil {
+		t.Fatalf("the tick loop should keep running")
+	}
+	if !m.loading {
+		t.Errorf("a tick while loading must not clear the in-flight state")
+	}
+}
+
 func TestSummaryShowsHealth(t *testing.T) {
-	m := New(context.Background(), collect.Collector{})
+	m := New(context.Background(), collect.Collector{}, 0)
 	m = update(m, tea.WindowSizeMsg{Width: 100, Height: 40})
 	m = update(m, snapshotMsg{snap: sampleSnapshot()})
 
@@ -62,7 +106,7 @@ func TestSummaryShowsHealth(t *testing.T) {
 }
 
 func TestSummaryShowsError(t *testing.T) {
-	m := New(context.Background(), collect.Collector{})
+	m := New(context.Background(), collect.Collector{}, 0)
 	m = update(m, snapshotMsg{err: context.DeadlineExceeded})
 	if !strings.Contains(m.View().Content, "error:") {
 		t.Errorf("expected error banner, got:\n%s", m.View().Content)
@@ -70,7 +114,7 @@ func TestSummaryShowsError(t *testing.T) {
 }
 
 func TestNavigationBounds(t *testing.T) {
-	m := New(context.Background(), collect.Collector{})
+	m := New(context.Background(), collect.Collector{}, 0)
 	m = update(m, snapshotMsg{snap: sampleSnapshot()})
 
 	if m.selected != 0 {
@@ -93,7 +137,7 @@ func TestNavigationBounds(t *testing.T) {
 }
 
 func TestEnterOpensUnitLogs(t *testing.T) {
-	m := New(context.Background(), collect.Collector{})
+	m := New(context.Background(), collect.Collector{}, 0)
 	m = update(m, snapshotMsg{snap: sampleSnapshot()})
 	m = update(m, key(tea.Key{Code: tea.KeyEnter}))
 
@@ -106,7 +150,7 @@ func TestEnterOpensUnitLogs(t *testing.T) {
 }
 
 func TestStreamAppendsAndShowsLive(t *testing.T) {
-	m := New(context.Background(), collect.Collector{})
+	m := New(context.Background(), collect.Collector{}, 0)
 	m = update(m, tea.WindowSizeMsg{Width: 100, Height: 40})
 	m = withLogs(m, "seasoning.service", "one", "two")
 
@@ -129,7 +173,7 @@ func TestStreamAppendsAndShowsLive(t *testing.T) {
 }
 
 func TestStreamEndMarksEnded(t *testing.T) {
-	m := New(context.Background(), collect.Collector{})
+	m := New(context.Background(), collect.Collector{}, 0)
 	m = withLogs(m, "seasoning.service", "one")
 	m = update(m, logStreamEndMsg{unit: "seasoning.service", gen: m.logGen})
 
@@ -142,7 +186,7 @@ func TestStreamEndMarksEnded(t *testing.T) {
 }
 
 func TestStaleGenerationIgnored(t *testing.T) {
-	m := New(context.Background(), collect.Collector{})
+	m := New(context.Background(), collect.Collector{}, 0)
 	m = withLogs(m, "seasoning.service", "one")
 	m = update(m, logLineMsg{unit: "seasoning.service", gen: m.logGen + 1, line: "stale"})
 
@@ -152,7 +196,7 @@ func TestStaleGenerationIgnored(t *testing.T) {
 }
 
 func TestLogsViewBack(t *testing.T) {
-	m := New(context.Background(), collect.Collector{})
+	m := New(context.Background(), collect.Collector{}, 0)
 	cancelled := false
 	m = update(m, snapshotMsg{snap: sampleSnapshot()})
 	m = withLogs(m, "seasoning.service", "hello")
@@ -172,7 +216,7 @@ func TestLogsViewBack(t *testing.T) {
 }
 
 func TestFollowScrollsToBottom(t *testing.T) {
-	m := New(context.Background(), collect.Collector{})
+	m := New(context.Background(), collect.Collector{}, 0)
 	m = update(m, tea.WindowSizeMsg{Width: 100, Height: 12})
 	lines := make([]string, 40)
 	for i := range lines {
@@ -202,7 +246,7 @@ func TestFollowScrollsToBottom(t *testing.T) {
 }
 
 func TestLogsHorizontalScroll(t *testing.T) {
-	m := New(context.Background(), collect.Collector{})
+	m := New(context.Background(), collect.Collector{}, 0)
 	m = update(m, tea.WindowSizeMsg{Width: 80, Height: 40})
 	m = withLogs(m, "seasoning.service", "ABCDEFGHIJKLMNOPQRSTUVWXYZ")
 
@@ -232,7 +276,7 @@ func TestLogsHorizontalScroll(t *testing.T) {
 }
 
 func TestLogsHorizontalScrollClamps(t *testing.T) {
-	m := New(context.Background(), collect.Collector{})
+	m := New(context.Background(), collect.Collector{}, 0)
 	m = update(m, tea.WindowSizeMsg{Width: 80, Height: 40})
 	m = withLogs(m, "seasoning.service", "12345")
 

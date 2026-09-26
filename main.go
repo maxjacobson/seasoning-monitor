@@ -23,6 +23,7 @@ func main() {
 	logs := flag.String("logs", "", "print journal for a unit (e.g. seasoning-prune) and exit")
 	lines := flag.Int("lines", 300, "number of journal lines to fetch with --logs")
 	execCmd := flag.String("exec", "", "run an arbitrary read-only shell command over ssh and exit")
+	refresh := flag.Duration("refresh", 5*time.Second, "how often the summary auto-refreshes")
 	timeout := flag.Duration("timeout", 30*time.Second, "per-command timeout")
 	flag.Parse()
 
@@ -69,7 +70,7 @@ func main() {
 		return
 	}
 
-	p := tea.NewProgram(ui.New(ctx, collector))
+	p := tea.NewProgram(ui.New(ctx, collector, *refresh))
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)

@@ -29,7 +29,11 @@ just exec 'df -h'                 # run a read-only command over ssh, then exit
 ```
 
 The same commands work through `go run .` with the flags `--probe`, `--once`,
-`--logs <unit>`, `--exec '<cmd>'`, and `--host <ssh-host>` (default `pi`).
+`--logs <unit>`, `--exec '<cmd>'`, `--host <ssh-host>` (default `pi`), and
+`--refresh <duration>` (default `5s`).
+
+The summary reloads itself every few seconds (see `--refresh`), showing a
+`refreshing...` hint while a load is in flight. Press `r` to refresh on demand.
 
 ### Keys
 
@@ -40,8 +44,7 @@ The same commands work through `go run .` with the flags `--probe`, `--once`,
 | `g` / `G`   | jump to top / bottom (follow)   |
 | `enter`     | follow logs for the selected unit |
 | `esc`       | back to the summary             |
-| `r`         | refresh (or restart the log stream) |
-| `q`         | quit                            |
+| `r`         | refresh (or restart the log stream) || `q`         | quit                            |
 
 ## How it works
 

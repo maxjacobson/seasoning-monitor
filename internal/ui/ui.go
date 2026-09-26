@@ -27,6 +27,9 @@ const (
 	logBacklog   = 300
 	maxLogLines  = 5000
 	channelDepth = 256
+
+	// defaultRefresh is how often the summary reloads itself.
+	defaultRefresh = 5 * time.Second
 )
 
 var (
@@ -74,12 +77,16 @@ type Model struct {
 	logCancel context.CancelFunc
 }
 
-// New builds a Model bound to the given source.
-func New(ctx context.Context, source Source) Model {
+// New builds a Model bound to the given source. refresh is how often the
+// summary reloads itself; values <= 0 use the default of a few seconds.
+func New(ctx context.Context, source Source, refresh time.Duration) Model {
+	if refresh <= 0 {
+		refresh = defaultRefresh
+	}
 	return Model{
 		source:       source,
 		ctx:          ctx,
-		refreshEvery: 30 * time.Second,
+		refreshEvery: refresh,
 		loading:      true,
 		logFollow:    true,
 	}
@@ -232,6 +239,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tickMsg:
+		// Skip a tick if a load is still in flight, so a slow ssh call can't
+		// pile up overlapping requests.
+		if m.loading {
+			return m, m.tick()
+		}
+		m.loading = true
 		return m, tea.Batch(m.load(), m.tick())
 
 	case tea.KeyPressMsg:
