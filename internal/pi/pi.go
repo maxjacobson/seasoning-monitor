@@ -67,18 +67,21 @@ type processReader struct {
 	pipe io.ReadCloser
 	cmd  *exec.Cmd
 	once sync.Once
+	err  error
 }
 
 func (p *processReader) Read(b []byte) (int, error) {
 	return p.pipe.Read(b)
 }
 
+// Close reaps the process and returns the error it exited with, if any. Callers
+// can use this to tell a clean finish from a crash once the stream ends.
 func (p *processReader) Close() error {
 	p.once.Do(func() {
 		_ = p.pipe.Close()
-		_ = p.cmd.Wait()
+		p.err = p.cmd.Wait()
 	})
-	return nil
+	return p.err
 }
 
 // FakeRunner is a Runner for tests that returns canned output.

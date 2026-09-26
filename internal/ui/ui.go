@@ -4,6 +4,7 @@ package ui
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -82,6 +83,7 @@ type Model struct {
 	logLines    []string
 	logErr      error
 	logStreamOn bool
+	logDone     bool
 	logFollow   bool
 	logY        int
 	logX        int
@@ -195,7 +197,6 @@ func (m Model) openStream(gen int, unit string, open func(context.Context) (io.R
 		ch := make(chan logItem, channelDepth)
 		go func() {
 			defer close(ch)
-			defer rc.Close()
 			defer cancel()
 			scanner := bufio.NewScanner(rc)
 			scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -203,10 +204,18 @@ func (m Model) openStream(gen int, unit string, open func(context.Context) (io.R
 				select {
 				case ch <- logItem{line: scanner.Text()}:
 				case <-ctx.Done():
+					_ = rc.Close()
 					return
 				}
 			}
-			if err := scanner.Err(); err != nil {
+			scanErr := scanner.Err()
+			// Close reports the command's exit status, which lets the UI tell a
+			// clean finish from a crash. A cancelled stream is not a failure.
+			exitErr := rc.Close()
+			if ctx.Err() != nil {
+				return
+			}
+			if err := errors.Join(scanErr, exitErr); err != nil {
 				select {
 				case ch <- logItem{err: err}:
 				case <-ctx.Done():
@@ -282,10 +291,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.err != nil {
 			m.logStreamOn = false
+			m.logDone = true
 			m.logErr = msg.err
 			return m, nil
 		}
 		m.logErr = nil
+		m.logDone = false
 		m.logStreamOn = true
 		m.logCh = msg.ch
 		m.logCancel = msg.cancel
@@ -306,6 +317,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.logStreamOn = false
+		m.logDone = true
 		m.logCh = nil
 		if msg.err != nil {
 			m.logErr = msg.err
@@ -360,6 +372,7 @@ func (m *Model) openUnit(unit string) tea.Cmd {
 	m.logDeploy = false
 	m.logLines = nil
 	m.logErr = nil
+	m.logDone = false
 	m.logFollow = true
 	m.logY = 0
 	m.logX = 0
@@ -377,6 +390,7 @@ func (m *Model) startDeploy() tea.Cmd {
 	m.logDeploy = true
 	m.logLines = nil
 	m.logErr = nil
+	m.logDone = false
 	m.logFollow = true
 	m.logY = 0
 	m.logX = 0
@@ -506,8 +520,8 @@ func (m Model) busy() bool {
 		return true
 	}
 	// Opening or restarting a log stream counts as connecting until the
-	// stream reports back.
-	return m.mode == modeLogs && !m.logStreamOn && m.logErr == nil
+	// stream reports back. A finished stream is no longer busy.
+	return m.mode == modeLogs && !m.logStreamOn && !m.logDone && m.logErr == nil
 }
 
 // progressBar drives the terminal's native progress indicator (OSC 9;4, shown
@@ -809,39 +823,62 @@ func (m Model) viewLogs() string {
 	}
 	b.WriteString(titleStyle.Render(title))
 	switch {
+	case m.logErr != nil:
+		b.WriteString("  ")
+		b.WriteString(badStyle.Render("● failed"))
 	case m.logStreamOn:
 		b.WriteString("  ")
 		b.WriteString(goodStyle.Render("● live"))
-	case m.logErr == nil && m.mode == modeLogs:
+	case m.logDone:
 		b.WriteString("  ")
-		b.WriteString(dimStyle.Render("(ended)"))
+		b.WriteString(goodStyle.Render("● done"))
+	default:
+		b.WriteString("  ")
+		b.WriteString(dimStyle.Render("connecting"))
 	}
 	if m.logX > 0 {
 		b.WriteString(dimStyle.Render(fmt.Sprintf("  col %d+", m.logX)))
 	}
 	b.WriteString("\n\n")
 
-	switch {
-	case m.logErr != nil:
-		b.WriteString(badStyle.Render("error: " + m.logErr.Error()))
-	case len(m.logLines) == 0:
+	start := m.viewStart()
+	end := min(start+m.visibleLines(), len(m.logLines))
+	for _, line := range m.logLines[start:end] {
+		b.WriteString(m.sliceLine(line))
+		b.WriteString("\n")
+	}
+	if len(m.logLines) == 0 && !m.logDone && m.logErr == nil {
 		if m.logStreamOn {
 			b.WriteString(dimStyle.Render("(waiting for output)"))
 		} else {
-			b.WriteString(dimStyle.Render("(no entries)"))
-		}
-	default:
-		start := m.viewStart()
-		end := min(start+m.visibleLines(), len(m.logLines))
-		for _, line := range m.logLines[start:end] {
-			b.WriteString(m.sliceLine(line))
-			b.WriteString("\n")
+			b.WriteString(dimStyle.Render("(connecting)"))
 		}
 	}
 
 	b.WriteString("\n")
+	if status := m.streamStatus(); status != "" {
+		b.WriteString(status)
+		b.WriteString("\n")
+	}
 	b.WriteString(dimStyle.Render("j/k scroll  h/l pan  g/G top/bottom  r restart  esc back  q quit"))
 	return b.String()
+}
+
+// streamStatus is the loud end-of-stream banner: it tells the user whether the
+// command finished cleanly or failed, so a completed run can't be mistaken for
+// one still working.
+func (m Model) streamStatus() string {
+	what := "stream"
+	if m.logDeploy {
+		what = "deploy"
+	}
+	switch {
+	case m.logErr != nil:
+		return badStyle.Render(fmt.Sprintf("%s failed: %s", what, m.logErr))
+	case m.logDone:
+		return goodStyle.Render(what + " finished successfully  ·  esc to close")
+	}
+	return ""
 }
 
 func (m Model) visibleLines() int {

@@ -2,6 +2,8 @@ package ui
 
 import (
 	"context"
+	"errors"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -320,14 +322,60 @@ func TestStreamAppendsAndShowsLive(t *testing.T) {
 
 func TestStreamEndMarksEnded(t *testing.T) {
 	m := New(context.Background(), collect.Collector{}, 0, 0)
+	m = update(m, snapshotMsg{snap: sampleSnapshot()})
+	m = withStats(m)
 	m = withLogs(m, "seasoning.service", "one")
 	m = update(m, logStreamEndMsg{unit: "seasoning.service", gen: m.logGen})
 
 	if m.logStreamOn {
 		t.Errorf("stream should have ended")
 	}
-	if !strings.Contains(m.View().Content, "ended") {
-		t.Errorf("expected ended indicator:\n%s", m.View().Content)
+	if !m.logDone {
+		t.Errorf("stream should be marked done")
+	}
+	view := m.View().Content
+	if !strings.Contains(view, "● done") {
+		t.Errorf("expected a done indicator:\n%s", view)
+	}
+	if !strings.Contains(view, "finished successfully") {
+		t.Errorf("expected a completion banner:\n%s", view)
+	}
+	if m.View().ProgressBar != nil {
+		t.Errorf("a finished stream should not look busy")
+	}
+}
+
+func TestStreamFailureMarksFailed(t *testing.T) {
+	m := New(context.Background(), collect.Collector{}, 0, 0)
+	m = withLogs(m, "seasoning.service", "boom")
+	m = update(m, logStreamEndMsg{unit: "seasoning.service", gen: m.logGen, err: errors.New("exit status 1")})
+
+	view := m.View().Content
+	for _, want := range []string{"● failed", "stream failed: exit status 1", "boom"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("failed stream view missing %q\n%s", want, view)
+		}
+	}
+	if strings.Contains(view, "finished successfully") {
+		t.Errorf("a failed stream must not claim success:\n%s", view)
+	}
+}
+
+func TestDeployCompletionBanner(t *testing.T) {
+	m := New(context.Background(), collect.Collector{}, 0, 0)
+	m = update(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = update(m, snapshotMsg{snap: sampleSnapshot()})
+	m = update(m, runeKey('d'))
+	m, _ = updateCmd(m, runeKey('y'))
+
+	m = update(m, logStreamEndMsg{unit: "deploy", gen: m.logGen})
+	if !strings.Contains(m.View().Content, "deploy finished successfully") {
+		t.Errorf("expected a deploy completion banner:\n%s", m.View().Content)
+	}
+
+	m = update(m, logStreamEndMsg{unit: "deploy", gen: m.logGen, err: errors.New("exit status 1")})
+	if !strings.Contains(m.View().Content, "deploy failed: exit status 1") {
+		t.Errorf("expected a deploy failure banner:\n%s", m.View().Content)
 	}
 }
 
@@ -540,5 +588,73 @@ func TestOpeningUnitLogsClearsDeployFlag(t *testing.T) {
 	}
 	if m.logTitle != "logs: seasoning.service" {
 		t.Errorf("log title = %q", m.logTitle)
+	}
+}
+
+// closingReader stands in for an ssh stream: it yields the recorded output and
+// reports the command's exit status from Close.
+type closingReader struct {
+	r   *strings.Reader
+	err error
+}
+
+func (c *closingReader) Read(p []byte) (int, error) { return c.r.Read(p) }
+func (c *closingReader) Close() error               { return c.err }
+
+type fakeSource struct {
+	deploy io.ReadCloser
+}
+
+func (f fakeSource) Snapshot(context.Context) (collect.Snapshot, error) {
+	return collect.Snapshot{}, nil
+}
+func (f fakeSource) Stats(context.Context) (collect.Stats, error) { return collect.Stats{}, nil }
+func (f fakeSource) StreamLogs(context.Context, string, int) (io.ReadCloser, error) {
+	return io.NopCloser(strings.NewReader("")), nil
+}
+func (f fakeSource) StreamDeploy(context.Context) (io.ReadCloser, error) { return f.deploy, nil }
+
+// drain runs a command and the chain of commands it schedules, so a streamed
+// deploy is exercised end to end.
+func drain(m Model, cmd tea.Cmd) Model {
+	for cmd != nil {
+		next, c := m.Update(cmd())
+		m = next.(Model)
+		cmd = c
+	}
+	return m
+}
+
+func TestDeployStreamReportsExitStatus(t *testing.T) {
+	src := fakeSource{deploy: &closingReader{r: strings.NewReader("pulling\n"), err: errors.New("exit status 1")}}
+	m := New(context.Background(), src, 0, 0)
+	m = update(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = update(m, snapshotMsg{snap: sampleSnapshot()})
+	m = update(m, runeKey('d'))
+	m, cmd := updateCmd(m, runeKey('y'))
+
+	m = drain(m, cmd)
+	if !m.logDone || m.logErr == nil {
+		t.Fatalf("expected the stream to finish with an error, done=%v err=%v", m.logDone, m.logErr)
+	}
+	if !strings.Contains(m.View().Content, "deploy failed: exit status 1") {
+		t.Errorf("expected a failure banner:\n%s", m.View().Content)
+	}
+}
+
+func TestDeployStreamReportsSuccess(t *testing.T) {
+	src := fakeSource{deploy: &closingReader{r: strings.NewReader("pulling\n")}}
+	m := New(context.Background(), src, 0, 0)
+	m = update(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = update(m, snapshotMsg{snap: sampleSnapshot()})
+	m = update(m, runeKey('d'))
+	m, cmd := updateCmd(m, runeKey('y'))
+
+	m = drain(m, cmd)
+	if !m.logDone || m.logErr != nil {
+		t.Fatalf("expected a clean finish, done=%v err=%v", m.logDone, m.logErr)
+	}
+	if !strings.Contains(m.View().Content, "deploy finished successfully") {
+		t.Errorf("expected a success banner:\n%s", m.View().Content)
 	}
 }

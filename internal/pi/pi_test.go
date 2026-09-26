@@ -2,6 +2,7 @@ package pi
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os/exec"
 	"strings"
@@ -31,6 +32,30 @@ func TestProcessReaderStreamsAndReaps(t *testing.T) {
 	}
 	if err := pr.Close(); err != nil {
 		t.Errorf("second Close should be a no-op: %v", err)
+	}
+}
+
+func TestProcessReaderReportsExitStatus(t *testing.T) {
+	cmd := exec.Command("sh", "-c", "printf 'oops\\n'; exit 3")
+	pipe, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("StdoutPipe: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	pr := &processReader{pipe: pipe, cmd: cmd}
+	if _, err := io.ReadAll(pr); err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	err = pr.Close()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("Close error = %v, want an *exec.ExitError", err)
+	}
+	if exitErr.ExitCode() != 3 {
+		t.Errorf("exit code = %d, want 3", exitErr.ExitCode())
 	}
 }
 
