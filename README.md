@@ -16,6 +16,11 @@ diagnostics, so nothing needs to be installed on the Pi.
   last ran and when it next will (e.g. `ran 23h ago · next in 17m`), turning
   amber if the next run is overdue. Timers are matched to the units they
   activate, so this scales to multiple timers.
+- **Traffic (24h)** — how many requests Rails served (`Processing by` lines)
+  and the 2xx/3xx/4xx/5xx breakdown. The breakdown turns red if any 5xx appear.
+- **Health checks** — failed systemd units, Postgres size and connection count,
+  how long ago the newest database backup was written (red if missing or
+  older than 26h), and recent nginx `[crit]/[error]` lines.
 
 Press `enter` on a row to follow its journal live (`journalctl -f`). New lines
 stream in as they are written; the header shows `● live` until the stream ends.
@@ -33,8 +38,9 @@ just exec 'df -h'                 # run a read-only command over ssh, then exit
 ```
 
 The same commands work through `go run .` with the flags `--probe`, `--once`,
-`--logs <unit>`, `--exec '<cmd>'`, `--host <ssh-host>` (default `pi`), and
-`--refresh <duration>` (default `5s`).
+`--logs <unit>`, `--exec '<cmd>'`, `--host <ssh-host>` (default `pi`),
+`--refresh <duration>` (default `5s`), and `--stats-refresh <duration>`
+(default `30s`).
 
 The summary reloads itself every few seconds (see `--refresh`), showing a
 `refreshing...` hint while a load is in flight. Press `r` to refresh on demand.
@@ -66,6 +72,11 @@ activate, so a unit's schedule travels with its row. See
 Logs are streamed, not polled: opening a unit starts `journalctl -f` over ssh,
 a goroutine scans its output into a buffered channel, and bubbletea reads one
 line at a time. Closing the view cancels the stream. See `internal/ui/ui.go`.
+
+The summary and the stats refresh on separate timers. Traffic is counted by
+scanning the journal for the last 24 hours, which is the most expensive thing
+we do (~0.6s on the Pi), so it runs every 30s while the summary runs every 5s.
+See `internal/collect/stats.go`.
 
 ## Development
 

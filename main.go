@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -23,6 +24,7 @@ func main() {
 	lines := flag.Int("lines", 300, "number of journal lines to fetch with --logs")
 	execCmd := flag.String("exec", "", "run an arbitrary read-only shell command over ssh and exit")
 	refresh := flag.Duration("refresh", 5*time.Second, "how often the summary auto-refreshes")
+	statsRefresh := flag.Duration("stats-refresh", 30*time.Second, "how often traffic/health stats refresh")
 	timeout := flag.Duration("timeout", 30*time.Second, "per-command timeout")
 	flag.Parse()
 
@@ -54,29 +56,30 @@ func main() {
 	}
 
 	if *probe || *once {
-		ctx, cancel := context.WithTimeout(ctx, *timeout)
+		ctx, cancel := context.WithTimeout(ctx, 2**timeout)
 		defer cancel()
 		snap, err := collector.Snapshot(ctx)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
 		}
+		stats, statsErr := collector.Stats(ctx)
 		if *probe {
-			printProbe(snap)
+			printProbe(snap, stats, statsErr)
 		} else {
-			printSummary(snap)
+			printSummary(snap, stats, statsErr)
 		}
 		return
 	}
 
-	p := tea.NewProgram(ui.New(ctx, collector, *refresh))
+	p := tea.NewProgram(ui.New(ctx, collector, *refresh, *statsRefresh))
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
 }
 
-func printProbe(s collect.Snapshot) {
+func printProbe(s collect.Snapshot, stats collect.Stats, statsErr error) {
 	fmt.Printf("collected: %s\n", s.CollectedAt.Format(time.RFC3339))
 	fmt.Printf("disk:      %d%% used, %s free on %s\n", s.Disk.Percent, s.Disk.Avail, s.Disk.Mount)
 	fmt.Printf("mem:       %d/%d MB used, %d MB available\n", s.Mem.UsedMB, s.Mem.TotalMB, s.Mem.AvailableMB)
@@ -102,9 +105,33 @@ func printProbe(s collect.Snapshot) {
 		}
 		fmt.Println(line)
 	}
+	printStats(stats, statsErr)
 }
 
-func printSummary(s collect.Snapshot) {
+func printStats(stats collect.Stats, statsErr error) {
+	if statsErr != nil {
+		fmt.Printf("stats:     error: %s\n", statsErr)
+		return
+	}
+	t := stats.Traffic
+	fmt.Printf("traffic:   %d requests (24h): 2xx %d, 3xx %d, 4xx %d, 5xx %d\n", t.Requests, t.S2xx, t.S3xx, t.S4xx, t.S5xx)
+	if len(stats.FailedUnits) == 0 {
+		fmt.Printf("failed:    0 units\n")
+	} else {
+		fmt.Printf("failed:    %d units: %s\n", len(stats.FailedUnits), strings.Join(stats.FailedUnits, ", "))
+	}
+	if stats.Database.OK {
+		fmt.Printf("postgres:  %s, %d connections\n", stats.Database.Size, stats.Database.Connections)
+	}
+	if stats.Backup.OK {
+		fmt.Printf("backup:    %s (%s)\n", stats.Backup.At.Format(time.RFC3339), stats.Backup.Key)
+	} else {
+		fmt.Printf("backup:    none found in 7 days\n")
+	}
+	fmt.Printf("nginx:     %d errors\n", stats.NginxErrors)
+}
+
+func printSummary(s collect.Snapshot, stats collect.Stats, statsErr error) {
 	fmt.Printf("seasoning health @ %s\n", s.CollectedAt.Format("15:04:05"))
 	fmt.Printf("  disk   %d%% used (%s free on %s)\n", s.Disk.Percent, s.Disk.Avail, s.Disk.Mount)
 	if s.Mem.TotalMB > 0 {
@@ -131,5 +158,38 @@ func printSummary(s collect.Snapshot) {
 			}
 		}
 		fmt.Println(line)
+	}
+	if statsErr != nil {
+		fmt.Printf("  stats  error: %s\n", statsErr)
+		return
+	}
+	t := stats.Traffic
+	fmt.Printf("  traffic  %d requests (24h): 2xx %d, 3xx %d, 4xx %d, 5xx %d\n", t.Requests, t.S2xx, t.S3xx, t.S4xx, t.S5xx)
+	fmt.Printf("  failed   %d units\n", len(stats.FailedUnits))
+	if stats.Database.OK {
+		fmt.Printf("  postgres %s, %d conns\n", stats.Database.Size, stats.Database.Connections)
+	}
+	if stats.Backup.OK {
+		fmt.Printf("  backup   %s\n", humanAgo(stats.Backup.At, s.CollectedAt))
+	} else {
+		fmt.Printf("  backup   none found in 7 days\n")
+	}
+	fmt.Printf("  nginx    %d errors\n", stats.NginxErrors)
+}
+
+func humanAgo(at, now time.Time) string {
+	d := now.Sub(at)
+	if d < 0 {
+		d = 0
+	}
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
 	}
 }

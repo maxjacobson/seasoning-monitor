@@ -191,7 +191,7 @@ echo '@@SM:TEMP@@'; vcgencmd measure_temp 2>/dev/null || echo 'temp=N/A'
 echo '@@SM:UPTIME@@'; uptime -p 2>/dev/null || uptime
 echo '@@SM:TIMERS@@'; systemctl list-timers --all --output=json --no-pager 2>/dev/null || true
 echo '@@SM:NOW@@'; date +%s
-for u in $(systemctl list-units --all --no-legend --no-pager 'seasoning*.service' | awk '$1 ~ /^seasoning.*\.service$/ {print $1}'); do
+for u in $(systemctl list-units --all --no-legend --no-pager 'seasoning*.service' | awk '{for (i=1;i<=NF;i++) if ($i ~ /^seasoning.*\.service$/) print $i}'); do
   echo "@@SM:SVC:$u@@"
   systemctl show "$u" -p LoadState -p ActiveState -p Result -p ExecMainStatus -p ExecMainExitTimestamp 2>/dev/null || true
 done`

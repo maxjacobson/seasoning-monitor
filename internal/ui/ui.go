@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,6 +31,9 @@ const (
 
 	// defaultRefresh is how often the summary reloads itself.
 	defaultRefresh = 5 * time.Second
+	// defaultStatsRefresh is how often the expensive stats reload. They scan
+	// the journal, so they run far less often than the summary.
+	defaultStatsRefresh = 30 * time.Second
 )
 
 var (
@@ -43,10 +47,11 @@ var (
 	panelStyle    = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
 )
 
-// Source provides snapshots and streaming logs. collect.Collector implements
-// it; tests substitute fakes.
+// Source provides snapshots, slower stats, and streaming logs.
+// collect.Collector implements it; tests substitute fakes.
 type Source interface {
 	Snapshot(ctx context.Context) (collect.Snapshot, error)
+	Stats(ctx context.Context) (collect.Stats, error)
 	StreamLogs(ctx context.Context, unit string, lines int) (io.ReadCloser, error)
 }
 
@@ -55,10 +60,15 @@ type Model struct {
 	source       Source
 	ctx          context.Context
 	refreshEvery time.Duration
+	statsEvery   time.Duration
 
 	snap    collect.Snapshot
 	err     error
 	loading bool
+
+	stats        collect.Stats
+	statsErr     error
+	statsLoading bool
 
 	width, height int
 	selected      int
@@ -78,16 +88,22 @@ type Model struct {
 }
 
 // New builds a Model bound to the given source. refresh is how often the
-// summary reloads itself; values <= 0 use the default of a few seconds.
-func New(ctx context.Context, source Source, refresh time.Duration) Model {
+// summary reloads itself; statsRefresh is the slower cadence for traffic and
+// other expensive-to-gather numbers. Values <= 0 use defaults.
+func New(ctx context.Context, source Source, refresh, statsRefresh time.Duration) Model {
 	if refresh <= 0 {
 		refresh = defaultRefresh
+	}
+	if statsRefresh <= 0 {
+		statsRefresh = defaultStatsRefresh
 	}
 	return Model{
 		source:       source,
 		ctx:          ctx,
 		refreshEvery: refresh,
+		statsEvery:   statsRefresh,
 		loading:      true,
+		statsLoading: true,
 		logFollow:    true,
 	}
 }
@@ -123,6 +139,15 @@ type logStreamEndMsg struct {
 // tickMsg triggers a periodic refresh.
 type tickMsg time.Time
 
+// statsMsg carries fresh traffic/health numbers (or a collection error).
+type statsMsg struct {
+	stats collect.Stats
+	err   error
+}
+
+// statsTickMsg triggers a periodic stats refresh.
+type statsTickMsg time.Time
+
 func (m Model) load() tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(m.ctx, 30*time.Second)
@@ -130,6 +155,19 @@ func (m Model) load() tea.Cmd {
 		snap, err := m.source.Snapshot(ctx)
 		return snapshotMsg{snap: snap, err: err}
 	}
+}
+
+func (m Model) loadStats() tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(m.ctx, 60*time.Second)
+		defer cancel()
+		stats, err := m.source.Stats(ctx)
+		return statsMsg{stats: stats, err: err}
+	}
+}
+
+func (m Model) statsTick() tea.Cmd {
+	return tea.Tick(m.statsEvery, func(t time.Time) tea.Msg { return statsTickMsg(t) })
 }
 
 // openLogStream starts `journalctl -f` for the unit and returns a message
@@ -176,9 +214,9 @@ func (m Model) tick() tea.Cmd {
 	return tea.Tick(m.refreshEvery, func(t time.Time) tea.Msg { return tickMsg(t) })
 }
 
-// Init kicks off the first load and the refresh timer.
+// Init kicks off the first loads and the refresh timers.
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.load(), m.tick())
+	return tea.Batch(m.load(), m.loadStats(), m.tick(), m.statsTick())
 }
 
 // Update handles messages.
@@ -246,6 +284,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.loading = true
 		return m, tea.Batch(m.load(), m.tick())
+
+	case statsMsg:
+		m.statsLoading = false
+		m.statsErr = msg.err
+		if msg.err == nil {
+			m.stats = msg.stats
+		}
+		return m, nil
+
+	case statsTickMsg:
+		if m.statsLoading {
+			return m, m.statsTick()
+		}
+		m.statsLoading = true
+		return m, tea.Batch(m.loadStats(), m.statsTick())
 
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
@@ -376,6 +429,8 @@ func (m Model) viewSummary() string {
 	}
 
 	b.WriteString(m.viewMetrics())
+	b.WriteString("\n")
+	b.WriteString(m.viewStats())
 	b.WriteString("\n\n")
 	b.WriteString(labelStyle.Render("services"))
 	b.WriteString("\n")
@@ -410,8 +465,111 @@ func (m Model) viewMetrics() string {
 	return panelStyle.Render(strings.Join(lines, "\n"))
 }
 
+func (m Model) viewStats() string {
+	if m.statsErr != nil {
+		return panelStyle.Render(badStyle.Render("stats error: " + m.statsErr.Error()))
+	}
+	if m.statsLoading && m.stats.Traffic.Requests == 0 {
+		return panelStyle.Render(dimStyle.Render("gathering traffic & health..."))
+	}
+
+	t := m.stats.Traffic
+	now := m.snap.CollectedAt
+
+	var lines []string
+	lines = append(lines, statsLine("traffic", humanCount(t.Requests)+" requests (24h)", dimStyle))
+	breakdown := fmt.Sprintf("2xx %d · 3xx %d · 4xx %d · 5xx %d", t.S2xx, t.S3xx, t.S4xx, t.S5xx)
+	breakdownStyle := dimStyle
+	if t.S5xx > 0 {
+		breakdownStyle = badStyle
+	}
+	lines = append(lines, statsLine("", breakdown, breakdownStyle))
+
+	failedValue := "0 units"
+	failedStyle := goodStyle
+	if n := len(m.stats.FailedUnits); n > 0 {
+		failedValue = fmt.Sprintf("%d: %s", n, strings.Join(m.stats.FailedUnits, ", "))
+		failedStyle = badStyle
+	}
+	lines = append(lines, statsLine("failed", failedValue, failedStyle))
+
+	if m.stats.Database.OK {
+		value := fmt.Sprintf("%s · %d conns", m.stats.Database.Size, m.stats.Database.Connections)
+		lines = append(lines, statsLine("postgres", value, dimStyle))
+	}
+
+	lines = append(lines, statsLine("backup", m.backupText(now), m.backupStyle(now)))
+
+	nginxStyle := goodStyle
+	if m.stats.NginxErrors > 0 {
+		nginxStyle = badStyle
+	}
+	lines = append(lines, statsLine("nginx", fmt.Sprintf("%d errors", m.stats.NginxErrors), nginxStyle))
+
+	return panelStyle.Render(strings.Join(lines, "\n"))
+}
+
+func (m Model) backupText(now time.Time) string {
+	b := m.stats.Backup
+	if !b.OK {
+		return "none found in 7 days"
+	}
+	return humanDuration(now.Sub(b.At)) + " ago"
+}
+
+func (m Model) backupStyle(now time.Time) lipgloss.Style {
+	b := m.stats.Backup
+	if !b.OK || b.Stale(now) {
+		return badStyle
+	}
+	return goodStyle
+}
+
+func statsLine(name, value string, style lipgloss.Style) string {
+	return fmt.Sprintf("%s %s", labelStyle.Width(8).Render(name), style.Render(value))
+}
+
 func metricLine(name, value string, style lipgloss.Style) string {
 	return fmt.Sprintf("%s %s", labelStyle.Width(7).Render(name), style.Render(value))
+}
+
+func humanDuration(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd", int(d.Hours()/24))
+	}
+}
+
+// humanCount formats n with thousands separators.
+func humanCount(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	digits := strconv.Itoa(n)
+	var out strings.Builder
+	if neg {
+		out.WriteByte('-')
+	}
+	for i, c := range digits {
+		if i > 0 && (len(digits)-i)%3 == 0 {
+			out.WriteByte(',')
+		}
+		out.WriteByte(byte(c))
+	}
+	return out.String()
 }
 
 func (m Model) diskText() string {

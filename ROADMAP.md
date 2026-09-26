@@ -17,9 +17,37 @@ Ideas and planned work for seasoning-monitor. Rough order, not a commitment.
 
 ## Later
 
-- [ ] Watch the Cloudflare tunnel (`cloudflared`) and nginx alongside the app.
-- [ ] Show the nightly timer's last fire and next fire as their own rows.
-- [ ] Historical view of nightly task results over time.
+- [ ] **Pi throttling / undervoltage** — `vcgencmd get_throttled`, red when the
+      current run has been throttled. A common Raspberry Pi failure mode.
+- [ ] **Disk growth per day** — track GB/day so a slowly filling disk is
+      visible before it's a problem.
+- [ ] **Error log view** — a key that opens a filtered (`5xx`, `FATAL`) journal
+      or nginx error view, rather than only counts.
+- [ ] **Watch the Cloudflare tunnel** (`cloudflared`) alongside nginx.
+- [ ] **Historical traffic** — the journal only keeps ~3 days for this unit, so
+      anything past that needs nginx access logs (~14 days) or an app-side
+      rollup.
+
+## Waiting on application changes
+
+These are ideas for MJ to consider on the Seasoning side; the monitor can use
+them once they exist. Deliberately described, not implemented, here.
+
+- **Nightly status file.** Have the nightly job write a small JSON after it
+  finishes (`finished_at`, `duration`, `ok`, and per-step results: backup
+  target/bytes, shows refreshed, sessions trimmed). The monitor would read one
+  file instead of scanning the journal, and we'd see *what* it did, not just
+  that it exited 0.
+- **Structured request logging** (e.g. lograge): one JSON line per request,
+  making traffic/error counts cheap and exact instead of regexing Rails text.
+- **A `/health` endpoint** the monitor can time through nginx (DB connectivity,
+  queue depth), giving an end-to-end latency signal.
+- **nginx `real_ip` + `$upstream_response_time`** in `log_format`: today every
+  request appears as `127.0.0.1` (cloudflared), and there's no latency.
+- **Backup verification:** the `seasoning-pi-backer-upper` IAM user can only
+  `PutObject`, so we can't confirm an object exists from the Pi. Granting
+  `s3:ListBucket` (or `s3:GetObject` on the prefix) would let us verify the
+  newest dump is really there.
 
 ## Done
 
@@ -28,3 +56,7 @@ Ideas and planned work for seasoning-monitor. Rough order, not a commitment.
 - [x] Per-unit journal viewer with vertical and horizontal scrolling.
 - [x] Live log streaming (`journalctl -f`) with follow, jump to top/bottom.
 - [x] A `justfile` for common tasks (`just` runs the TUI).
+- [x] Auto-refreshing summary, with the scheduled next run on each unit's row.
+- [x] Traffic (24h) with a status breakdown, and 5xx highlighted.
+- [x] Health checks: failed units, Postgres size/connections, backup freshness,
+      and nginx error counts.
