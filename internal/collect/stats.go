@@ -14,7 +14,7 @@ import (
 type Stats struct {
 	Traffic     Traffic
 	FailedUnits []string
-	NginxErrors int
+	Nginx       Nginx
 	Database    Database
 	Backup      Backup
 }
@@ -34,6 +34,31 @@ type Database struct {
 	Size        string
 	Connections int
 	OK          bool
+}
+
+// Nginx is the nginx error log: how many errors the current log holds and when
+// the newest one happened. nginx rotates its log daily, so Count is scoped to
+// roughly the last day and LastAt is what lets the UI judge freshness.
+type Nginx struct {
+	Count  int
+	LastAt time.Time
+	LastOK bool
+}
+
+// Summary describes the errors with the newest one's age, e.g. "1 error ·
+// 6h ago". It falls back to a bare count when the age couldn't be read.
+func (n Nginx) Summary(now time.Time) string {
+	if n.Count == 0 {
+		return "0 errors"
+	}
+	noun := "errors"
+	if n.Count == 1 {
+		noun = "error"
+	}
+	if !n.LastOK {
+		return fmt.Sprintf("%d %s", n.Count, noun)
+	}
+	return fmt.Sprintf("%d %s · %s ago", n.Count, noun, shortDuration(now.Sub(n.LastAt)))
 }
 
 // Backup records the most recent successful database dump.
@@ -69,8 +94,10 @@ journalctl -u seasoning --since "24 hours ago" --no-pager 2>/dev/null | awk '
 '
 echo '@@SM:FAILED@@'
 systemctl --failed --no-legend --no-pager 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i ~ /\.(service|timer|socket|mount|target|path|device)$/) {print $i; break}}'
-echo '@@SM:NGINX_ERRORS@@'
-n=$(grep -cE '\[(crit|error|alert|emerg)\]' /var/log/nginx/error.log 2>/dev/null || true); echo "${n:-0}"
+echo '@@SM:NGINX@@'
+n=$(grep -cE '\[(crit|error|alert|emerg)\]' /var/log/nginx/error.log 2>/dev/null || true); printf 'count=%s\n' "${n:-0}"
+last=$(grep -E '\[(crit|error|alert|emerg)\]' /var/log/nginx/error.log 2>/dev/null | tail -1 | cut -d' ' -f1,2)
+if [ -n "$last" ]; then printf 'last_epoch=%s\n' "$(date -d "$last" +%s)"; fi
 echo '@@SM:DB@@'
 psql seasoning_production -h /var/run/postgresql -tAc "select pg_size_pretty(pg_database_size(current_database())) || ' ' || (select count(*) from pg_stat_activity)" 2>/dev/null || true
 echo '@@SM:BACKUP@@'
@@ -82,10 +109,20 @@ func parseStats(out string) Stats {
 	return Stats{
 		Traffic:     parseTraffic(s.plain["TRAFFIC"]),
 		FailedUnits: parseFailedUnits(s.plain["FAILED"]),
-		NginxErrors: atoiTrim(s.plain["NGINX_ERRORS"]),
+		Nginx:       parseNginx(s.plain["NGINX"]),
 		Database:    parseDatabase(s.plain["DB"]),
 		Backup:      parseBackup(s.plain["BACKUP"]),
 	}
+}
+
+func parseNginx(s string) Nginx {
+	kv := parseKV(s)
+	n := Nginx{Count: atoiTrim(kv["count"])}
+	if secs, err := strconv.ParseInt(strings.TrimSpace(kv["last_epoch"]), 10, 64); err == nil && secs > 0 {
+		n.LastAt = time.Unix(secs, 0)
+		n.LastOK = true
+	}
+	return n
 }
 
 func parseTraffic(s string) Traffic {

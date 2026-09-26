@@ -128,7 +128,7 @@ func printStats(stats collect.Stats, statsErr error) {
 	} else {
 		fmt.Printf("backup:    none found in 7 days\n")
 	}
-	fmt.Printf("nginx:     %d errors\n", stats.NginxErrors)
+	fmt.Printf("nginx:     %s\n", stats.Nginx.Summary(time.Now()))
 }
 
 func printSummary(s collect.Snapshot, stats collect.Stats, statsErr error) {
@@ -174,7 +174,7 @@ func printSummary(s collect.Snapshot, stats collect.Stats, statsErr error) {
 	} else {
 		fmt.Printf("  backup   none found in 7 days\n")
 	}
-	fmt.Printf("  nginx    %d errors\n", stats.NginxErrors)
+	fmt.Printf("  nginx    %s\n", stats.Nginx.Summary(s.CollectedAt))
 }
 
 func humanAgo(at, now time.Time) string {

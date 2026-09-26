@@ -53,7 +53,7 @@ them once they exist. Deliberately described, not implemented, here.
 - [x] Auto-refreshing summary, with the scheduled next run on each unit's row.
 - [x] Traffic (24h) with a status breakdown, and 5xx highlighted.
 - [x] Health checks: failed units, Postgres size/connections, backup freshness,
-      and nginx error counts.
+      and nginx errors with the newest error's age (red only when recent).
 - [x] Deploy the app from the TUI: a `d` binding on the app row, gated behind a
       confirmation, streams `bin/pull-and-release` into the log pane and can be
       cancelled mid-flight.

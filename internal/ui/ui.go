@@ -625,14 +625,24 @@ func (m Model) viewStats() string {
 	}
 
 	lines = append(lines, statsLine("backup", m.backupText(now), m.backupStyle(now)))
-
-	nginxStyle := goodStyle
-	if m.stats.NginxErrors > 0 {
-		nginxStyle = badStyle
-	}
-	lines = append(lines, statsLine("nginx", fmt.Sprintf("%d errors", m.stats.NginxErrors), nginxStyle))
+	lines = append(lines, statsLine("nginx", m.stats.Nginx.Summary(now), m.nginxStyle(now)))
 
 	return panelStyle.Render(strings.Join(lines, "\n"))
+}
+
+// nginxRecent is how fresh an nginx error must be to count as an active
+// problem; older errors are worth noting but not alarming.
+const nginxRecent = 15 * time.Minute
+
+func (m Model) nginxStyle(now time.Time) lipgloss.Style {
+	n := m.stats.Nginx
+	if n.Count == 0 {
+		return goodStyle
+	}
+	if n.LastOK && now.Sub(n.LastAt) <= nginxRecent {
+		return badStyle
+	}
+	return warnStyle
 }
 
 func (m Model) backupText(now time.Time) string {

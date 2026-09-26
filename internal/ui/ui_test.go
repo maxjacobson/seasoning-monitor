@@ -108,7 +108,7 @@ func sampleStats() collect.Stats {
 	return collect.Stats{
 		Traffic:     collect.Traffic{Window: 24 * time.Hour, Requests: 8437, S2xx: 3704, S3xx: 4035, S4xx: 697, S5xx: 1},
 		FailedUnits: []string{"foo.service"},
-		NginxErrors: 2,
+		Nginx:       collect.Nginx{Count: 2, LastAt: time.Date(2026, 9, 25, 11, 0, 0, 0, time.UTC), LastOK: true},
 		Database:    collect.Database{Size: "104 MB", Connections: 7, OK: true},
 		Backup:      collect.Backup{At: time.Date(2026, 9, 25, 11, 0, 0, 0, time.UTC), Key: "bucket/x.dump.gz", OK: true},
 	}
@@ -656,5 +656,38 @@ func TestDeployStreamReportsSuccess(t *testing.T) {
 	}
 	if !strings.Contains(m.View().Content, "deploy finished successfully") {
 		t.Errorf("expected a success banner:\n%s", m.View().Content)
+	}
+}
+
+func TestNginxFreshnessDrivesColour(t *testing.T) {
+	snap := sampleSnapshot()
+	s := sampleStats()
+	// Isolate nginx: clear the other sources of red in the stats panel.
+	s.Traffic.S5xx = 0
+	s.FailedUnits = nil
+	s.Backup.At = snap.CollectedAt.Add(-time.Hour)
+
+	m := New(context.Background(), collect.Collector{}, 0, 0)
+	m = update(m, snapshotMsg{snap: snap})
+
+	s.Nginx = collect.Nginx{Count: 1, LastAt: snap.CollectedAt.Add(-2 * time.Minute), LastOK: true}
+	m = update(m, statsMsg{stats: s})
+	if !strings.Contains(m.View().Content, "1 error · 2m ago") {
+		t.Errorf("nginx line missing age:\n%s", m.View().Content)
+	}
+	if !strings.Contains(m.View().Content, "38;5;203") {
+		t.Errorf("a recent nginx error should be red:\n%s", m.View().Content)
+	}
+
+	s.Nginx.LastAt = snap.CollectedAt.Add(-6 * time.Hour)
+	m = update(m, statsMsg{stats: s})
+	if !strings.Contains(m.View().Content, "1 error · 6h ago") {
+		t.Errorf("nginx line missing age:\n%s", m.View().Content)
+	}
+	if strings.Contains(m.View().Content, "38;5;203") {
+		t.Errorf("a stale nginx error should not be red:\n%s", m.View().Content)
+	}
+	if !strings.Contains(m.View().Content, "38;5;214") {
+		t.Errorf("a stale nginx error should be amber:\n%s", m.View().Content)
 	}
 }
