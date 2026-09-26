@@ -12,6 +12,8 @@ diagnostics, so nothing needs to be installed on the Pi.
 - **CPU temperature** (`vcgencmd measure_temp`)
 - **`seasoning*` systemd units** — discovered dynamically, each with its load
   state, active state, and last run result. The Rails app is listed first.
+- **Nightly timer** — a compact `next Sat 00:00 in 22m · last 23h ago`, and it
+  turns amber if the next run is overdue.
 
 Press `enter` on a row to follow its journal live (`journalctl -f`). New lines
 stream in as they are written; the header shows `● live` until the stream ends.

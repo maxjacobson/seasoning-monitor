@@ -407,8 +407,12 @@ func (m Model) viewMetrics() string {
 	if m.snap.Uptime != "" {
 		lines = append(lines, metricLine("uptime", m.snap.Uptime, dimStyle))
 	}
-	if m.snap.Timer != "" {
-		lines = append(lines, metricLine("timer", strings.Join(strings.Fields(m.snap.Timer), " "), dimStyle))
+	if m.snap.Timer.NextOK || m.snap.Timer.LastOK {
+		style := dimStyle
+		if m.snap.Timer.Overdue(m.snap.CollectedAt) {
+			style = warnStyle
+		}
+		lines = append(lines, metricLine("timer", m.snap.Timer.Summary(m.snap.CollectedAt), style))
 	}
 	return panelStyle.Render(strings.Join(lines, "\n"))
 }

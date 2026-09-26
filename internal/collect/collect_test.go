@@ -3,6 +3,7 @@ package collect
 import (
 	"context"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -22,7 +23,9 @@ temp=48.3'C
 @@SM:UPTIME@@
 up 3 days, 4 hours
 @@SM:TIMER@@
-Sat 2026-09-26 00:00:00 EDT 43min Fri 2026-09-25 00:00:07 EDT 23h ago seasoning-nightly.timer seasoning-nightly.service
+[{"next":1790395200000000,"left":1790395200000000,"last":1790308807915788,"passed":472465858216,"unit":"seasoning-nightly.timer","activates":"seasoning-nightly.service"}]
+@@SM:NOW@@
+1790394840
 @@SM:SVC:seasoning-nightly.service@@
 LoadState=loaded
 ActiveState=inactive
@@ -64,6 +67,22 @@ func TestParseSnapshot(t *testing.T) {
 	}
 	if snap.Uptime != "up 3 days, 4 hours" {
 		t.Errorf("uptime = %q", snap.Uptime)
+	}
+	if snap.CollectedAt.Unix() != 1790394840 {
+		t.Errorf("CollectedAt = %v, want NOW from the host", snap.CollectedAt.Unix())
+	}
+	if !snap.Timer.NextOK || snap.Timer.Next.Unix() != 1790395200 {
+		t.Errorf("timer next = %v ok=%v", snap.Timer.Next, snap.Timer.NextOK)
+	}
+	if !snap.Timer.LastOK || snap.Timer.Last.Unix() != 1790308807 {
+		t.Errorf("timer last = %v ok=%v", snap.Timer.Last, snap.Timer.LastOK)
+	}
+	if snap.Timer.Unit != "seasoning-nightly.timer" {
+		t.Errorf("timer unit = %q", snap.Timer.Unit)
+	}
+	summary := snap.Timer.Summary(snap.CollectedAt)
+	if !strings.Contains(summary, "in 6m") || !strings.Contains(summary, "last 23h ago") {
+		t.Errorf("timer summary = %q", summary)
 	}
 
 	if len(snap.Services) != 3 {
@@ -168,6 +187,37 @@ func TestStreamLogs(t *testing.T) {
 	}
 	if string(data) != "first\nsecond\n" {
 		t.Errorf("stream = %q", string(data))
+	}
+}
+
+func TestParseTimerEdgeCases(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+	}{
+		{"empty", ""},
+		{"malformed", "not json"},
+		{"empty array", "[]"},
+		{"null times", `[{"unit":"t.timer","next":null,"last":0}]`},
+	}
+	for _, c := range cases {
+		if got := parseTimer(c.in); got.NextOK || got.LastOK {
+			t.Errorf("%s: expected unknown, got %+v", c.name, got)
+		}
+	}
+}
+
+func TestTimerSummaryOverdue(t *testing.T) {
+	now := time.Unix(1000, 0)
+	tm := Timer{Next: now.Add(-5 * time.Minute), NextOK: true}
+	if !tm.Overdue(now) {
+		t.Errorf("expected the timer to be overdue")
+	}
+	if got := tm.Summary(now); !strings.Contains(got, "overdue") {
+		t.Errorf("summary = %q", got)
+	}
+	if got := (Timer{}).Summary(now); got != "unknown" {
+		t.Errorf("empty summary = %q", got)
 	}
 }
 

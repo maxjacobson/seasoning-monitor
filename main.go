@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -88,7 +87,7 @@ func printProbe(s collect.Snapshot) {
 		fmt.Printf("temp:      unknown\n")
 	}
 	fmt.Printf("uptime:    %s\n", s.Uptime)
-	fmt.Printf("timer:     %s\n", strings.Join(strings.Fields(s.Timer), " "))
+	fmt.Printf("timer:     %s\n", s.Timer.Summary(s.CollectedAt))
 	for _, svc := range s.Services {
 		state := svc.Result
 		if svc.Missing() {

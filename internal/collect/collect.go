@@ -3,6 +3,7 @@ package collect
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"sort"
@@ -27,7 +28,7 @@ type Snapshot struct {
 	TempC       float64
 	TempOK      bool
 	Uptime      string
-	Timer       string
+	Timer       Timer
 	Services    []Service
 }
 
@@ -51,6 +52,58 @@ type Load struct {
 	Five    float64
 	Fifteen float64
 	NProc   int
+}
+
+// Timer is the state of the nightly systemd timer.
+type Timer struct {
+	Unit      string
+	Activates string
+	Next      time.Time
+	NextOK    bool
+	Last      time.Time
+	LastOK    bool
+}
+
+// Overdue reports whether the timer's next elapse has already passed.
+func (t Timer) Overdue(now time.Time) bool {
+	return t.NextOK && !t.Next.After(now)
+}
+
+// Summary renders a compact, single-line description of the timer relative to
+// now, e.g. "next Sat 00:00 in 24m  ·  last 23h ago".
+func (t Timer) Summary(now time.Time) string {
+	if !t.NextOK && !t.LastOK {
+		return "unknown"
+	}
+	var parts []string
+	switch {
+	case !t.NextOK:
+		// no next elapse to show
+	case t.Next.After(now):
+		parts = append(parts, fmt.Sprintf("next %s in %s", t.Next.Format("Mon 15:04"), shortDuration(t.Next.Sub(now))))
+	default:
+		parts = append(parts, fmt.Sprintf("next %s overdue by %s", t.Next.Format("Mon 15:04"), shortDuration(now.Sub(t.Next))))
+	}
+	if t.LastOK {
+		parts = append(parts, fmt.Sprintf("last %s ago", shortDuration(now.Sub(t.Last))))
+	}
+	return strings.Join(parts, "  ·  ")
+}
+
+func shortDuration(d time.Duration) string {
+	if d < 0 {
+		d = -d
+	}
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd", int(d.Hours()/24))
+	}
 }
 
 // Service is the observed state of a `seasoning*` systemd unit.
@@ -138,7 +191,8 @@ echo '@@SM:LOAD@@'; cat /proc/loadavg
 echo '@@SM:NPROC@@'; nproc
 echo '@@SM:TEMP@@'; vcgencmd measure_temp 2>/dev/null || echo 'temp=N/A'
 echo '@@SM:UPTIME@@'; uptime -p 2>/dev/null || uptime
-echo '@@SM:TIMER@@'; systemctl list-timers seasoning-nightly.timer --no-pager --no-legend 2>/dev/null || true
+echo '@@SM:TIMER@@'; systemctl list-timers seasoning-nightly.timer --output=json --no-pager 2>/dev/null || true
+echo '@@SM:NOW@@'; date +%s
 for u in $(systemctl list-units --all --no-legend --no-pager 'seasoning*.service' | awk '$1 ~ /^seasoning.*\.service$/ {print $1}'); do
   echo "@@SM:SVC:$u@@"
   systemctl show "$u" -p LoadState -p ActiveState -p Result -p ExecMainStatus -p ExecMainExitTimestamp 2>/dev/null || true
@@ -208,18 +262,57 @@ func parseKV(body string) map[string]string {
 
 func parseSnapshot(out string, now time.Time) (Snapshot, error) {
 	s := parseSections(out)
-	snap := Snapshot{CollectedAt: now, Uptime: s.plain["UPTIME"], Timer: s.plain["TIMER"]}
+	if secs, err := strconv.ParseInt(strings.TrimSpace(s.plain["NOW"]), 10, 64); err == nil && secs > 0 {
+		now = time.Unix(secs, 0)
+	}
+	snap := Snapshot{CollectedAt: now, Uptime: s.plain["UPTIME"]}
 
 	snap.Disk = parseDisk(s.plain["DISK"])
 	snap.Mem = parseMem(s.plain["MEM"])
 	snap.Load = parseLoad(s.plain["LOAD"], s.plain["NPROC"])
 	snap.TempC, snap.TempOK = parseTemp(s.plain["TEMP"])
+	snap.Timer = parseTimer(s.plain["TIMER"])
 
 	for _, unit := range s.svcList {
 		snap.Services = append(snap.Services, serviceFromKV(unit, s.svcs[unit]))
 	}
 	sortServices(snap.Services)
 	return snap, nil
+}
+
+// timerJSON mirrors the fields systemd emits for `list-timers --output=json`.
+// Next and Last are absolute times in microseconds since the epoch.
+type timerJSON struct {
+	Unit      string `json:"unit"`
+	Activates string `json:"activates"`
+	Next      *int64 `json:"next"`
+	Last      *int64 `json:"last"`
+}
+
+func parseTimer(s string) Timer {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return Timer{}
+	}
+	var entries []timerJSON
+	if err := json.Unmarshal([]byte(s), &entries); err != nil || len(entries) == 0 {
+		return Timer{}
+	}
+	e := entries[0]
+	t := Timer{Unit: e.Unit, Activates: e.Activates}
+	if e.Next != nil && *e.Next > 0 {
+		t.Next = microsToTime(*e.Next)
+		t.NextOK = true
+	}
+	if e.Last != nil && *e.Last > 0 {
+		t.Last = microsToTime(*e.Last)
+		t.LastOK = true
+	}
+	return t
+}
+
+func microsToTime(us int64) time.Time {
+	return time.Unix(us/1_000_000, (us%1_000_000)*1000)
 }
 
 // sortServices puts the Rails app first, then the rest alphabetically.
