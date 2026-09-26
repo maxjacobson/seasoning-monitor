@@ -89,7 +89,8 @@ Common tasks live in the `justfile`. Run `just` to launch the TUI, or
 `just list` to see everything.
 
 ```sh
-just check    # formatting, vet, and tests
+just check    # formatting, vet, editor warnings, and tests
+just lint     # gopls warnings (what the editor shows)
 just test     # tests only
 just fmt      # format
 just build    # build the binary

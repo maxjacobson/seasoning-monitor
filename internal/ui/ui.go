@@ -83,7 +83,7 @@ type Model struct {
 	logX        int
 
 	logGen    int
-	logCh     chan string
+	logCh     chan logItem
 	logCancel context.CancelFunc
 }
 
@@ -114,11 +114,18 @@ type snapshotMsg struct {
 	err  error
 }
 
+// logItem is one piece of stream output: a journal line or the terminal
+// read error.
+type logItem struct {
+	line string
+	err  error
+}
+
 // logStreamStartMsg signals that a follow stream has been established.
 type logStreamStartMsg struct {
 	unit   string
 	gen    int
-	ch     chan string
+	ch     chan logItem
 	cancel context.CancelFunc
 	err    error
 }
@@ -134,6 +141,7 @@ type logLineMsg struct {
 type logStreamEndMsg struct {
 	unit string
 	gen  int
+	err  error
 }
 
 // tickMsg triggers a periodic refresh.
@@ -181,7 +189,7 @@ func (m Model) openLogStream(unit string, gen int) tea.Cmd {
 			cancel()
 			return logStreamStartMsg{unit: unit, gen: gen, err: err}
 		}
-		ch := make(chan string, channelDepth)
+		ch := make(chan logItem, channelDepth)
 		go func() {
 			defer close(ch)
 			defer rc.Close()
@@ -190,9 +198,15 @@ func (m Model) openLogStream(unit string, gen int) tea.Cmd {
 			scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 			for scanner.Scan() {
 				select {
-				case ch <- scanner.Text():
+				case ch <- logItem{line: scanner.Text()}:
 				case <-ctx.Done():
 					return
+				}
+			}
+			if err := scanner.Err(); err != nil {
+				select {
+				case ch <- logItem{err: err}:
+				case <-ctx.Done():
 				}
 			}
 		}()
@@ -200,13 +214,16 @@ func (m Model) openLogStream(unit string, gen int) tea.Cmd {
 	}
 }
 
-func waitForLogLine(ch chan string, unit string, gen int) tea.Cmd {
+func waitForLogLine(ch chan logItem, unit string, gen int) tea.Cmd {
 	return func() tea.Msg {
-		line, ok := <-ch
+		item, ok := <-ch
 		if !ok {
 			return logStreamEndMsg{unit: unit, gen: gen}
 		}
-		return logLineMsg{unit: unit, gen: gen, line: line}
+		if item.err != nil {
+			return logStreamEndMsg{unit: unit, gen: gen, err: item.err}
+		}
+		return logLineMsg{unit: unit, gen: gen, line: item.line}
 	}
 }
 
@@ -233,10 +250,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.snap = msg.snap
 		}
 		if n := len(m.snap.Services); m.selected >= n {
-			m.selected = n - 1
-			if m.selected < 0 {
-				m.selected = 0
-			}
+			m.selected = max(n-1, 0)
 		}
 		return m, nil
 
@@ -274,6 +288,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.logStreamOn = false
 		m.logCh = nil
+		if msg.err != nil {
+			m.logErr = msg.err
+		}
 		return m, nil
 
 	case tickMsg:
@@ -342,10 +359,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case "up", "k":
 			if m.logFollow {
 				m.logFollow = false
-				m.logY = m.tailStart() - 1
-				if m.logY < 0 {
-					m.logY = 0
-				}
+				m.logY = max(m.tailStart()-1, 0)
 			} else if m.logY > 0 {
 				m.logY--
 			}
@@ -715,9 +729,11 @@ func (m Model) viewLogs() string {
 	b.WriteString(titleStyle.Render("logs: " + m.logUnit))
 	switch {
 	case m.logStreamOn:
-		b.WriteString("  " + goodStyle.Render("● live"))
+		b.WriteString("  ")
+		b.WriteString(goodStyle.Render("● live"))
 	case m.logErr == nil && m.mode == modeLogs:
-		b.WriteString("  " + dimStyle.Render("(ended)"))
+		b.WriteString("  ")
+		b.WriteString(dimStyle.Render("(ended)"))
 	}
 	if m.logX > 0 {
 		b.WriteString(dimStyle.Render(fmt.Sprintf("  col %d+", m.logX)))
@@ -735,10 +751,7 @@ func (m Model) viewLogs() string {
 		}
 	default:
 		start := m.viewStart()
-		end := start + m.visibleLines()
-		if end > len(m.logLines) {
-			end = len(m.logLines)
-		}
+		end := min(start+m.visibleLines(), len(m.logLines))
 		for _, line := range m.logLines[start:end] {
 			b.WriteString(m.sliceLine(line))
 			b.WriteString("\n")
@@ -771,10 +784,7 @@ func (m Model) viewStart() int {
 	if m.logFollow {
 		return m.tailStart()
 	}
-	start := m.logY
-	if start > len(m.logLines)-1 {
-		start = len(m.logLines) - 1
-	}
+	start := min(m.logY, len(m.logLines)-1)
 	if start < 0 {
 		return 0
 	}

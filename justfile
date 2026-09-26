@@ -39,6 +39,19 @@ test:
 vet:
     go vet ./...
 
+# Report the warnings gopls (Zed's Go language server) would show.
+lint:
+    #!/usr/bin/env sh
+    if ! command -v gopls >/dev/null 2>&1; then
+        echo "gopls not found; install it with: go install golang.org/x/tools/gopls@latest" >&2
+        exit 1
+    fi
+    out=$(gopls check $(find . -name '*.go'))
+    if [ -n "$out" ]; then
+        printf '%s\n' "$out" >&2
+        exit 1
+    fi
+
 # Format all Go files.
 fmt:
     gofmt -w .
@@ -47,8 +60,8 @@ fmt:
 fmt-check:
     test -z "$(gofmt -l .)"
 
-# Everything CI would run: formatting, vet, and tests.
-check: fmt-check vet test
+# Everything CI would run: formatting, vet, editor warnings, and tests.
+check: fmt-check vet lint test
 
 # Remove the built binary.
 clean:

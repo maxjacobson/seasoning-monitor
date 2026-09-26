@@ -50,7 +50,7 @@ func withLogs(m Model, unit string, lines ...string) Model {
 	m.mode = modeLogs
 	m.logUnit = unit
 	m.logCancel = func() {}
-	m = update(m, logStreamStartMsg{unit: unit, gen: m.logGen, ch: make(chan string), cancel: func() {}})
+	m = update(m, logStreamStartMsg{unit: unit, gen: m.logGen, ch: make(chan logItem), cancel: func() {}})
 	for _, line := range lines {
 		m = update(m, logLineMsg{unit: unit, gen: m.logGen, line: line})
 	}
@@ -158,7 +158,7 @@ func TestProgressBarFollowsWork(t *testing.T) {
 		t.Errorf("expected a progress bar while connecting the log stream")
 	}
 
-	m = update(m, logStreamStartMsg{unit: "seasoning.service", gen: m.logGen, ch: make(chan string), cancel: func() {}})
+	m = update(m, logStreamStartMsg{unit: "seasoning.service", gen: m.logGen, ch: make(chan logItem), cancel: func() {}})
 	if m.View().ProgressBar != nil {
 		t.Errorf("expected no progress bar once the stream is live")
 	}
@@ -426,7 +426,7 @@ func TestLogsHorizontalScrollClamps(t *testing.T) {
 	m = update(m, tea.WindowSizeMsg{Width: 80, Height: 40})
 	m = withLogs(m, "seasoning.service", "12345")
 
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		m = update(m, key(tea.Key{Code: tea.KeyRight}))
 	}
 	if m.logX != 5 {
