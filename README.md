@@ -13,18 +13,23 @@ diagnostics, so nothing needs to be installed on the Pi.
 - **`seasoning*` systemd units** — discovered dynamically, each with its load
   state, active state, and last run result. The Rails app is listed first.
 
-Press `enter` on a row to read its journal (`journalctl -u <unit>`).
+Press `enter` on a row to follow its journal live (`journalctl -f`). New lines
+stream in as they are written; the header shows `● live` until the stream ends.
 
 ## Usage
 
 ```sh
-go run .                          # interactive TUI
-go run . --probe                  # raw snapshot as plain text, then exit
-go run . --once                   # one rendered summary, then exit
-go run . --logs seasoning-nightly # journal for a unit, then exit
-go run . --exec 'df -h'           # run a read-only command over ssh, then exit
-go run . --host pi                # override the ssh host (default: pi)
+just                              # interactive TUI
+just run                          # same thing
+just list                         # show all recipes
+just probe                        # raw snapshot as plain text, then exit
+just once                         # one rendered summary, then exit
+just logs seasoning-nightly       # follow a unit's journal in the terminal
+just exec 'df -h'                 # run a read-only command over ssh, then exit
 ```
+
+The same commands work through `go run .` with the flags `--probe`, `--once`,
+`--logs <unit>`, `--exec '<cmd>'`, and `--host <ssh-host>` (default `pi`).
 
 ### Keys
 
@@ -32,9 +37,10 @@ go run . --host pi                # override the ssh host (default: pi)
 | ----------- | ------------------------------- |
 | `j` / `k`   | move selection (or scroll logs) |
 | `h` / `l`   | pan logs left/right             |
-| `enter`     | open logs for the selected unit |
+| `g` / `G`   | jump to top / bottom (follow)   |
+| `enter`     | follow logs for the selected unit |
 | `esc`       | back to the summary             |
-| `r`         | refresh now                     |
+| `r`         | refresh (or restart the log stream) |
 | `q`         | quit                            |
 
 ## How it works
@@ -48,9 +54,18 @@ that isn't installed shows up as missing instead of falsely healthy
 (`systemctl show` reports `Result=success` even for absent units). See
 `internal/collect/collect.go` for the script and parser.
 
+Logs are streamed, not polled: opening a unit starts `journalctl -f` over ssh,
+a goroutine scans its output into a buffered channel, and bubbletea reads one
+line at a time. Closing the view cancels the stream. See `internal/ui/ui.go`.
+
 ## Development
 
+Common tasks live in the `justfile`. Run `just` to launch the TUI, or
+`just list` to see everything.
+
 ```sh
-go test ./...
-go vet ./...
+just check    # formatting, vet, and tests
+just test     # tests only
+just fmt      # format
+just build    # build the binary
 ```

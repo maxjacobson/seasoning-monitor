@@ -35,6 +35,19 @@ func update(m Model, msg tea.Msg) Model {
 
 func key(k tea.Key) tea.Msg { return tea.KeyPressMsg(k) }
 
+// withLogs simulates an open follow stream that has already delivered lines.
+func withLogs(m Model, unit string, lines ...string) Model {
+	m.logGen++
+	m.mode = modeLogs
+	m.logUnit = unit
+	m.logCancel = func() {}
+	m = update(m, logStreamStartMsg{unit: unit, gen: m.logGen, ch: make(chan string), cancel: func() {}})
+	for _, line := range lines {
+		m = update(m, logLineMsg{unit: unit, gen: m.logGen, line: line})
+	}
+	return m
+}
+
 func TestSummaryShowsHealth(t *testing.T) {
 	m := New(context.Background(), collect.Collector{})
 	m = update(m, tea.WindowSizeMsg{Width: 100, Height: 40})
@@ -73,9 +86,6 @@ func TestNavigationBounds(t *testing.T) {
 		t.Errorf("down moved selection to %d, want 1", m.selected)
 	}
 	m = update(m, key(tea.Key{Text: "j", Code: 'j'}))
-	if m.selected != 2 {
-		t.Errorf("down moved selection to %d, want 2", m.selected)
-	}
 	m = update(m, key(tea.Key{Text: "j", Code: 'j'}))
 	if m.selected != 2 {
 		t.Errorf("down past end moved selection to %d, want 2", m.selected)
@@ -95,11 +105,58 @@ func TestEnterOpensUnitLogs(t *testing.T) {
 	}
 }
 
+func TestStreamAppendsAndShowsLive(t *testing.T) {
+	m := New(context.Background(), collect.Collector{})
+	m = update(m, tea.WindowSizeMsg{Width: 100, Height: 40})
+	m = withLogs(m, "seasoning.service", "one", "two")
+
+	if len(m.logLines) != 2 {
+		t.Fatalf("logLines = %v, want 2 entries", m.logLines)
+	}
+	if !m.logStreamOn {
+		t.Errorf("stream should be on")
+	}
+	if !m.logFollow {
+		t.Errorf("should follow by default")
+	}
+	view := m.View().Content
+	if !strings.Contains(view, "live") {
+		t.Errorf("view should show a live indicator:\n%s", view)
+	}
+	if !strings.Contains(view, "one") || !strings.Contains(view, "two") {
+		t.Errorf("view missing streamed lines:\n%s", view)
+	}
+}
+
+func TestStreamEndMarksEnded(t *testing.T) {
+	m := New(context.Background(), collect.Collector{})
+	m = withLogs(m, "seasoning.service", "one")
+	m = update(m, logStreamEndMsg{unit: "seasoning.service", gen: m.logGen})
+
+	if m.logStreamOn {
+		t.Errorf("stream should have ended")
+	}
+	if !strings.Contains(m.View().Content, "ended") {
+		t.Errorf("expected ended indicator:\n%s", m.View().Content)
+	}
+}
+
+func TestStaleGenerationIgnored(t *testing.T) {
+	m := New(context.Background(), collect.Collector{})
+	m = withLogs(m, "seasoning.service", "one")
+	m = update(m, logLineMsg{unit: "seasoning.service", gen: m.logGen + 1, line: "stale"})
+
+	if strings.Contains(strings.Join(m.logLines, "\n"), "stale") {
+		t.Errorf("stale line was appended: %v", m.logLines)
+	}
+}
+
 func TestLogsViewBack(t *testing.T) {
 	m := New(context.Background(), collect.Collector{})
+	cancelled := false
 	m = update(m, snapshotMsg{snap: sampleSnapshot()})
-	m = update(m, key(tea.Key{Code: tea.KeyEnter}))
-	m = update(m, logsMsg{unit: "seasoning.service", text: "hello\nworld"})
+	m = withLogs(m, "seasoning.service", "hello")
+	m.logCancel = func() { cancelled = true }
 
 	if !strings.Contains(m.View().Content, "hello") {
 		t.Errorf("logs view missing content:\n%s", m.View().Content)
@@ -109,14 +166,45 @@ func TestLogsViewBack(t *testing.T) {
 	if m.mode != modeSummary {
 		t.Errorf("esc did not return to summary, mode = %v", m.mode)
 	}
+	if !cancelled {
+		t.Errorf("leaving the log view should stop the stream")
+	}
+}
+
+func TestFollowScrollsToBottom(t *testing.T) {
+	m := New(context.Background(), collect.Collector{})
+	m = update(m, tea.WindowSizeMsg{Width: 100, Height: 12})
+	lines := make([]string, 40)
+	for i := range lines {
+		lines[i] = "line"
+	}
+	m = withLogs(m, "seasoning.service", lines...)
+
+	if !m.logFollow {
+		t.Fatalf("expected to be following")
+	}
+	if got := m.viewStart(); got == 0 {
+		t.Errorf("follow mode should start at the bottom, got start 0")
+	}
+
+	m = update(m, key(tea.Key{Code: tea.KeyUp}))
+	if m.logFollow {
+		t.Errorf("scrolling up should stop following")
+	}
+	if m.logY >= len(lines) {
+		t.Errorf("logY = %d out of range", m.logY)
+	}
+
+	m = update(m, key(tea.Key{Code: tea.KeyDown}))
+	if !m.logFollow {
+		t.Errorf("scrolling back to the bottom should resume following")
+	}
 }
 
 func TestLogsHorizontalScroll(t *testing.T) {
 	m := New(context.Background(), collect.Collector{})
 	m = update(m, tea.WindowSizeMsg{Width: 80, Height: 40})
-	m = update(m, snapshotMsg{snap: sampleSnapshot()})
-	m = update(m, key(tea.Key{Code: tea.KeyEnter}))
-	m = update(m, logsMsg{unit: "seasoning.service", text: "ABCDEFGHIJKLMNOPQRSTUVWXYZ"})
+	m = withLogs(m, "seasoning.service", "ABCDEFGHIJKLMNOPQRSTUVWXYZ")
 
 	if !strings.Contains(m.View().Content, "logs: seasoning.service") {
 		t.Fatalf("unexpected header:\n%s", m.View().Content)
@@ -136,7 +224,6 @@ func TestLogsHorizontalScroll(t *testing.T) {
 		t.Errorf("expected shifted content:\n%s", m.View().Content)
 	}
 
-	// Panning back to zero and beyond stays clamped.
 	m = update(m, key(tea.Key{Code: tea.KeyLeft}))
 	m = update(m, key(tea.Key{Code: tea.KeyLeft}))
 	if m.logX != 0 {
@@ -147,9 +234,7 @@ func TestLogsHorizontalScroll(t *testing.T) {
 func TestLogsHorizontalScrollClamps(t *testing.T) {
 	m := New(context.Background(), collect.Collector{})
 	m = update(m, tea.WindowSizeMsg{Width: 80, Height: 40})
-	m = update(m, snapshotMsg{snap: sampleSnapshot()})
-	m = update(m, key(tea.Key{Code: tea.KeyEnter}))
-	m = update(m, logsMsg{unit: "seasoning.service", text: "12345"})
+	m = withLogs(m, "seasoning.service", "12345")
 
 	for i := 0; i < 10; i++ {
 		m = update(m, key(tea.Key{Code: tea.KeyRight}))

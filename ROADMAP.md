@@ -17,7 +17,6 @@ Ideas and planned work for seasoning-monitor. Rough order, not a commitment.
 
 ## Later
 
-- [ ] Follow/tail mode for logs (keep appending instead of a fixed snapshot).
 - [ ] Watch the Cloudflare tunnel (`cloudflared`) and nginx alongside the app.
 - [ ] Show the nightly timer's last fire and next fire as their own rows.
 - [ ] Historical view of nightly task results over time.
@@ -27,3 +26,5 @@ Ideas and planned work for seasoning-monitor. Rough order, not a commitment.
 - [x] Disk, memory, load, and CPU temperature panel.
 - [x] Rails app and `seasoning*` unit health, discovered dynamically.
 - [x] Per-unit journal viewer with vertical and horizontal scrolling.
+- [x] Live log streaming (`journalctl -f`) with follow, jump to top/bottom.
+- [x] A `justfile` for common tasks (`just` runs the TUI).

@@ -2,8 +2,10 @@
 package ui
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -20,7 +22,12 @@ const (
 	modeLogs
 )
 
-const scrollStep = 8
+const (
+	scrollStep   = 8
+	logBacklog   = 300
+	maxLogLines  = 5000
+	channelDepth = 256
+)
 
 var (
 	titleStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205"))
@@ -33,9 +40,16 @@ var (
 	panelStyle    = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
 )
 
+// Source provides snapshots and streaming logs. collect.Collector implements
+// it; tests substitute fakes.
+type Source interface {
+	Snapshot(ctx context.Context) (collect.Snapshot, error)
+	StreamLogs(ctx context.Context, unit string, lines int) (io.ReadCloser, error)
+}
+
 // Model is the bubbletea model for the monitor.
 type Model struct {
-	collector    collect.Collector
+	source       Source
 	ctx          context.Context
 	refreshEvery time.Duration
 
@@ -46,22 +60,28 @@ type Model struct {
 	width, height int
 	selected      int
 
-	mode       mode
-	logUnit    string
-	logText    string
-	logErr     error
-	logLoading bool
-	logY       int
-	logX       int
+	mode        mode
+	logUnit     string
+	logLines    []string
+	logErr      error
+	logStreamOn bool
+	logFollow   bool
+	logY        int
+	logX        int
+
+	logGen    int
+	logCh     chan string
+	logCancel context.CancelFunc
 }
 
-// New builds a Model bound to the given collector.
-func New(ctx context.Context, c collect.Collector) Model {
+// New builds a Model bound to the given source.
+func New(ctx context.Context, source Source) Model {
 	return Model{
-		collector:    c,
+		source:       source,
 		ctx:          ctx,
 		refreshEvery: 30 * time.Second,
 		loading:      true,
+		logFollow:    true,
 	}
 }
 
@@ -71,11 +91,26 @@ type snapshotMsg struct {
 	err  error
 }
 
-// logsMsg carries journal output for a unit.
-type logsMsg struct {
+// logStreamStartMsg signals that a follow stream has been established.
+type logStreamStartMsg struct {
+	unit   string
+	gen    int
+	ch     chan string
+	cancel context.CancelFunc
+	err    error
+}
+
+// logLineMsg is a single new journal line.
+type logLineMsg struct {
 	unit string
-	text string
-	err  error
+	gen  int
+	line string
+}
+
+// logStreamEndMsg signals that the follow stream has finished.
+type logStreamEndMsg struct {
+	unit string
+	gen  int
 }
 
 // tickMsg triggers a periodic refresh.
@@ -85,17 +120,48 @@ func (m Model) load() tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(m.ctx, 30*time.Second)
 		defer cancel()
-		snap, err := m.collector.Snapshot(ctx)
+		snap, err := m.source.Snapshot(ctx)
 		return snapshotMsg{snap: snap, err: err}
 	}
 }
 
-func (m Model) loadLogs(unit string) tea.Cmd {
+// openLogStream starts `journalctl -f` for the unit and returns a message
+// carrying the channel and cancel function once the process is running.
+func (m Model) openLogStream(unit string, gen int) tea.Cmd {
+	source := m.source
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(m.ctx, 30*time.Second)
-		defer cancel()
-		text, err := m.collector.Logs(ctx, unit, 300)
-		return logsMsg{unit: unit, text: text, err: err}
+		ctx, cancel := context.WithCancel(context.Background())
+		rc, err := source.StreamLogs(ctx, unit, logBacklog)
+		if err != nil {
+			cancel()
+			return logStreamStartMsg{unit: unit, gen: gen, err: err}
+		}
+		ch := make(chan string, channelDepth)
+		go func() {
+			defer close(ch)
+			defer rc.Close()
+			defer cancel()
+			scanner := bufio.NewScanner(rc)
+			scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+			for scanner.Scan() {
+				select {
+				case ch <- scanner.Text():
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+		return logStreamStartMsg{unit: unit, gen: gen, ch: ch, cancel: cancel}
+	}
+}
+
+func waitForLogLine(ch chan string, unit string, gen int) tea.Cmd {
+	return func() tea.Msg {
+		line, ok := <-ch
+		if !ok {
+			return logStreamEndMsg{unit: unit, gen: gen}
+		}
+		return logLineMsg{unit: unit, gen: gen, line: line}
 	}
 }
 
@@ -129,12 +195,40 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case logsMsg:
-		m.logLoading = false
-		m.logText = msg.text
-		m.logErr = msg.err
-		m.logY = 0
-		m.logX = 0
+	case logStreamStartMsg:
+		if msg.gen != m.logGen {
+			if msg.cancel != nil {
+				msg.cancel()
+			}
+			return m, nil
+		}
+		if msg.err != nil {
+			m.logStreamOn = false
+			m.logErr = msg.err
+			return m, nil
+		}
+		m.logErr = nil
+		m.logStreamOn = true
+		m.logCh = msg.ch
+		m.logCancel = msg.cancel
+		return m, waitForLogLine(msg.ch, msg.unit, msg.gen)
+
+	case logLineMsg:
+		if msg.gen != m.logGen {
+			return m, nil
+		}
+		m.logLines = append(m.logLines, msg.line)
+		if len(m.logLines) > maxLogLines {
+			m.logLines = m.logLines[len(m.logLines)-maxLogLines:]
+		}
+		return m, waitForLogLine(m.logCh, msg.unit, msg.gen)
+
+	case logStreamEndMsg:
+		if msg.gen != m.logGen {
+			return m, nil
+		}
+		m.logStreamOn = false
+		m.logCh = nil
 		return m, nil
 
 	case tickMsg:
@@ -146,6 +240,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m *Model) stopLogStream() {
+	if m.logCancel != nil {
+		m.logCancel()
+		m.logCancel = nil
+	}
+	m.logCh = nil
+	m.logStreamOn = false
+}
+
+func (m *Model) openUnit(unit string) tea.Cmd {
+	m.stopLogStream()
+	m.logGen++
+	m.mode = modeLogs
+	m.logUnit = unit
+	m.logLines = nil
+	m.logErr = nil
+	m.logFollow = true
+	m.logY = 0
+	m.logX = 0
+	return m.openLogStream(unit, m.logGen)
+}
+
 func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 	if key == "ctrl+c" {
@@ -155,13 +271,25 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.mode == modeLogs {
 		switch key {
 		case "q", "esc", "backspace":
+			m.stopLogStream()
 			m.mode = modeSummary
 		case "up", "k":
-			if m.logY > 0 {
+			if m.logFollow {
+				m.logFollow = false
+				m.logY = m.tailStart() - 1
+				if m.logY < 0 {
+					m.logY = 0
+				}
+			} else if m.logY > 0 {
 				m.logY--
 			}
 		case "down", "j":
-			m.logY++
+			if !m.logFollow {
+				m.logY++
+				if m.logY >= m.tailStart() {
+					m.logFollow = true
+				}
+			}
 		case "left", "h":
 			if m.logX >= scrollStep {
 				m.logX -= scrollStep
@@ -170,9 +298,13 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 		case "right", "l":
 			m.logX += scrollStep
+		case "g":
+			m.logFollow = false
+			m.logY = 0
+		case "G", "f":
+			m.logFollow = true
 		case "r":
-			m.logLoading = true
-			return m, m.loadLogs(m.logUnit)
+			return m, m.openUnit(m.logUnit)
 		}
 		m.clampLog()
 		return m, nil
@@ -196,15 +328,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if len(m.snap.Services) == 0 {
 			return m, nil
 		}
-		unit := m.snap.Services[m.selected].Unit
-		m.mode = modeLogs
-		m.logUnit = unit
-		m.logText = ""
-		m.logErr = nil
-		m.logY = 0
-		m.logX = 0
-		m.logLoading = true
-		return m, m.loadLogs(unit)
+		return m, m.openUnit(m.snap.Services[m.selected].Unit)
 	}
 	return m, nil
 }
@@ -387,56 +511,72 @@ func (m Model) renderTarget(s collect.Service) string {
 func (m Model) viewLogs() string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("logs: " + m.logUnit))
-	if m.logLoading {
-		b.WriteString(dimStyle.Render("  loading..."))
+	switch {
+	case m.logStreamOn:
+		b.WriteString("  " + goodStyle.Render("● live"))
+	case m.logErr == nil && m.mode == modeLogs:
+		b.WriteString("  " + dimStyle.Render("(ended)"))
 	}
 	if m.logX > 0 {
 		b.WriteString(dimStyle.Render(fmt.Sprintf("  col %d+", m.logX)))
 	}
 	b.WriteString("\n\n")
 
-	lines := m.logLines()
 	switch {
 	case m.logErr != nil:
 		b.WriteString(badStyle.Render("error: " + m.logErr.Error()))
-	case len(lines) == 0:
-		b.WriteString(dimStyle.Render("(no entries)"))
+	case len(m.logLines) == 0:
+		if m.logStreamOn {
+			b.WriteString(dimStyle.Render("(waiting for output)"))
+		} else {
+			b.WriteString(dimStyle.Render("(no entries)"))
+		}
 	default:
-		visible := m.height - 6
-		if visible < 1 {
-			visible = 20
+		start := m.viewStart()
+		end := start + m.visibleLines()
+		if end > len(m.logLines) {
+			end = len(m.logLines)
 		}
-		start := m.logY
-		if start > len(lines)-1 {
-			start = len(lines) - 1
-		}
-		end := start + visible
-		if end > len(lines) {
-			end = len(lines)
-		}
-		for _, line := range lines[start:end] {
+		for _, line := range m.logLines[start:end] {
 			b.WriteString(m.sliceLine(line))
-			b.WriteString("\n")
-		}
-		if end < len(lines) {
-			b.WriteString(dimStyle.Render(fmt.Sprintf("... %d more lines", len(lines)-end)))
 			b.WriteString("\n")
 		}
 	}
 
 	b.WriteString("\n")
-	b.WriteString(dimStyle.Render("j/k scroll  h/l pan  r reload  esc back  q quit"))
+	b.WriteString(dimStyle.Render("j/k scroll  h/l pan  g/G top/bottom  r restart  esc back  q quit"))
 	return b.String()
 }
 
-func (m Model) logLines() []string {
-	if strings.TrimSpace(m.logText) == "" {
-		return nil
+func (m Model) visibleLines() int {
+	visible := m.height - 6
+	if visible < 1 {
+		return 20
 	}
-	if strings.Contains(m.logText, "-- No entries --") {
-		return nil
+	return visible
+}
+
+// tailStart is the first line shown when following the bottom of the log.
+func (m Model) tailStart() int {
+	start := len(m.logLines) - m.visibleLines()
+	if start < 0 {
+		return 0
 	}
-	return strings.Split(strings.TrimRight(m.logText, "\n"), "\n")
+	return start
+}
+
+func (m Model) viewStart() int {
+	if m.logFollow {
+		return m.tailStart()
+	}
+	start := m.logY
+	if start > len(m.logLines)-1 {
+		start = len(m.logLines) - 1
+	}
+	if start < 0 {
+		return 0
+	}
+	return start
 }
 
 // sliceLine applies the current horizontal offset and clips to the viewport.
@@ -457,22 +597,10 @@ func (m Model) sliceLine(line string) string {
 	return string(runes)
 }
 
-// clampLog keeps the vertical and horizontal offsets inside the content.
+// clampLog keeps the horizontal offset inside the content.
 func (m *Model) clampLog() {
-	lines := m.logLines()
-	if len(lines) == 0 {
-		m.logY, m.logX = 0, 0
-		return
-	}
-	if m.logY > len(lines)-1 {
-		m.logY = len(lines) - 1
-	}
-	if m.logY < 0 {
-		m.logY = 0
-	}
-
 	maxWidth := 0
-	for _, line := range lines {
+	for _, line := range m.logLines {
 		if w := len([]rune(line)); w > maxWidth {
 			maxWidth = w
 		}

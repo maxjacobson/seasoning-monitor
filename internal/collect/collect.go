@@ -4,6 +4,7 @@ package collect
 import (
 	"context"
 	"fmt"
+	"io"
 	"sort"
 	"strconv"
 	"strings"
@@ -119,6 +120,16 @@ func (c Collector) Logs(ctx context.Context, unit string, lines int) (string, er
 	}
 	cmd := fmt.Sprintf("journalctl -u %s -n %d --no-pager --output=short-iso", unit, lines)
 	return c.Runner.Run(ctx, cmd)
+}
+
+// StreamLogs returns a reader over the unit's journal that keeps yielding new
+// lines as they are written (`journalctl -f`). Closing the reader stops it.
+func (c Collector) StreamLogs(ctx context.Context, unit string, lines int) (io.ReadCloser, error) {
+	if lines <= 0 {
+		lines = 200
+	}
+	cmd := fmt.Sprintf("journalctl -u %s -n %d -f --no-pager --output=short-iso", unit, lines)
+	return c.Runner.Stream(ctx, cmd)
 }
 
 const snapshotScript = `echo '@@SM:DISK@@'; df -hP / | awk 'NR==2 {print $5, $4, $6}'

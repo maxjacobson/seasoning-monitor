@@ -2,6 +2,7 @@ package collect
 
 import (
 	"context"
+	"io"
 	"testing"
 	"time"
 
@@ -147,6 +148,26 @@ func TestSnapshotUsesRunner(t *testing.T) {
 	}
 	if snap.CollectedAt.IsZero() {
 		t.Errorf("expected CollectedAt to be set")
+	}
+}
+
+func TestStreamLogs(t *testing.T) {
+	cmd := "journalctl -u seasoning.service -n 300 -f --no-pager --output=short-iso"
+	runner := pi.FakeRunner{Streams: map[string]string{cmd: "first\nsecond\n"}}
+	c := Collector{Runner: runner}
+
+	rc, err := c.StreamLogs(context.Background(), "seasoning.service", 300)
+	if err != nil {
+		t.Fatalf("StreamLogs: %v", err)
+	}
+	defer rc.Close()
+
+	data, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(data) != "first\nsecond\n" {
+		t.Errorf("stream = %q", string(data))
 	}
 }
 
