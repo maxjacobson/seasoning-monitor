@@ -198,6 +198,25 @@ func TestStreamLogs(t *testing.T) {
 	}
 }
 
+func TestStreamDeploy(t *testing.T) {
+	runner := pi.FakeRunner{Streams: map[string]string{DeployCommand: "pulling\nrestarting\n"}}
+	c := Collector{Runner: runner}
+
+	rc, err := c.StreamDeploy(context.Background())
+	if err != nil {
+		t.Fatalf("StreamDeploy: %v", err)
+	}
+	defer rc.Close()
+
+	data, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(data) != "pulling\nrestarting\n" {
+		t.Errorf("deploy stream = %q", string(data))
+	}
+}
+
 func TestParseTimersEdgeCases(t *testing.T) {
 	empty := []struct {
 		name string

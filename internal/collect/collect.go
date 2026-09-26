@@ -188,6 +188,18 @@ func (c Collector) StreamLogs(ctx context.Context, unit string, lines int) (io.R
 	return c.Runner.Stream(ctx, cmd)
 }
 
+// DeployCommand updates the app checkout from main and restarts the Rails
+// service. It mutates the host, so callers must confirm before running it.
+// The rbenv shims are prepended because ssh runs non-interactively and the
+// login shell never adds them to PATH.
+const DeployCommand = `cd /home/maxwell/Documents/seasoning && PATH="$HOME/.rbenv/shims:$PATH" bin/pull-and-release`
+
+// StreamDeploy runs the app's pull-and-release script and returns a reader over
+// its output as it is produced. Closing the reader stops the deploy.
+func (c Collector) StreamDeploy(ctx context.Context) (io.ReadCloser, error) {
+	return c.Runner.Stream(ctx, DeployCommand)
+}
+
 const snapshotScript = `echo '@@SM:DISK@@'; df -hP / | awk 'NR==2 {print $5, $4, $6}'
 echo '@@SM:MEM@@'; free -m | awk '/^Mem:/ {print $2, $3, $7}'
 echo '@@SM:LOAD@@'; cat /proc/loadavg

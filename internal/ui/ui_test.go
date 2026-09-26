@@ -433,3 +433,112 @@ func TestLogsHorizontalScrollClamps(t *testing.T) {
 		t.Errorf("logX = %d, want clamped to 5", m.logX)
 	}
 }
+
+func runeKey(r rune) tea.Msg {
+	return key(tea.Key{Text: string(r), Code: r})
+}
+
+func TestDeployAsksForConfirmation(t *testing.T) {
+	m := New(context.Background(), collect.Collector{}, 0, 0)
+	m = update(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = update(m, snapshotMsg{snap: sampleSnapshot()})
+
+	m, cmd := updateCmd(m, runeKey('d'))
+	if m.mode != modeConfirm {
+		t.Fatalf("d should open the confirmation, mode = %v", m.mode)
+	}
+	if cmd != nil {
+		t.Errorf("the confirmation step must not start work yet")
+	}
+	view := m.View().Content
+	for _, want := range []string{"deploy seasoning?", "restarts the Rails service", collect.DeployCommand, "y confirm"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("confirmation missing %q\n%s", want, view)
+		}
+	}
+}
+
+func TestDeployCancelReturnsToSummary(t *testing.T) {
+	m := New(context.Background(), collect.Collector{}, 0, 0)
+	m = update(m, snapshotMsg{snap: sampleSnapshot()})
+	m = update(m, runeKey('d'))
+	m = update(m, key(tea.Key{Code: tea.KeyEscape}))
+
+	if m.mode != modeSummary {
+		t.Errorf("escape should cancel the deploy, mode = %v", m.mode)
+	}
+	if m.logUnit == "deploy" {
+		t.Errorf("cancelling must not start the deploy stream")
+	}
+}
+
+func TestDeployConfirmStartsStream(t *testing.T) {
+	m := New(context.Background(), collect.Collector{}, 0, 0)
+	m = update(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = update(m, snapshotMsg{snap: sampleSnapshot()})
+	m = update(m, runeKey('d'))
+
+	m, cmd := updateCmd(m, runeKey('y'))
+	if cmd == nil {
+		t.Fatalf("confirming should start the deploy stream")
+	}
+	if m.mode != modeLogs {
+		t.Errorf("deploy should open the stream pane, mode = %v", m.mode)
+	}
+	if m.logUnit != "deploy" || m.logTitle != "deploy: seasoning" {
+		t.Errorf("deploy stream identity = %q / %q", m.logUnit, m.logTitle)
+	}
+	if !strings.Contains(m.View().Content, "deploy: seasoning") {
+		t.Errorf("deploy pane missing its title:\n%s", m.View().Content)
+	}
+}
+
+func TestDeployOnlyOfferedOnAppRow(t *testing.T) {
+	m := New(context.Background(), collect.Collector{}, 0, 0)
+	m = update(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = update(m, snapshotMsg{snap: sampleSnapshot()})
+
+	m = update(m, key(tea.Key{Code: tea.KeyDown}))
+	if !strings.Contains(m.View().Content, "enter logs") || strings.Contains(m.View().Content, "d deploy") {
+		t.Errorf("only the app row should advertise deploy:\n%s", m.View().Content)
+	}
+
+	m = update(m, runeKey('d'))
+	if m.mode != modeSummary {
+		t.Errorf("d on a non-app row must do nothing, mode = %v", m.mode)
+	}
+}
+
+func TestDeployRestartKeepsDeploying(t *testing.T) {
+	m := New(context.Background(), collect.Collector{}, 0, 0)
+	m = update(m, snapshotMsg{snap: sampleSnapshot()})
+	m = update(m, runeKey('d'))
+	m, _ = updateCmd(m, runeKey('y'))
+
+	if !m.logDeploy {
+		t.Fatalf("deploy pane should be flagged as a deploy")
+	}
+	m, cmd := updateCmd(m, runeKey('r'))
+	if cmd == nil {
+		t.Errorf("r should restart the deploy stream")
+	}
+	if !m.logDeploy || m.logTitle != "deploy: seasoning" {
+		t.Errorf("r should keep deploying, got %q deploy=%v", m.logTitle, m.logDeploy)
+	}
+}
+
+func TestOpeningUnitLogsClearsDeployFlag(t *testing.T) {
+	m := New(context.Background(), collect.Collector{}, 0, 0)
+	m = update(m, snapshotMsg{snap: sampleSnapshot()})
+	m = update(m, runeKey('d'))
+	m, _ = updateCmd(m, runeKey('y'))
+	m = update(m, key(tea.Key{Code: tea.KeyEscape}))
+
+	m, _ = updateCmd(m, key(tea.Key{Code: tea.KeyEnter}))
+	if m.logDeploy {
+		t.Errorf("journal logs must not be treated as a deploy")
+	}
+	if m.logTitle != "logs: seasoning.service" {
+		t.Errorf("log title = %q", m.logTitle)
+	}
+}

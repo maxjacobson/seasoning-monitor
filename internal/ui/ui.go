@@ -21,6 +21,7 @@ type mode int
 const (
 	modeSummary mode = iota
 	modeLogs
+	modeConfirm
 )
 
 const (
@@ -53,6 +54,7 @@ type Source interface {
 	Snapshot(ctx context.Context) (collect.Snapshot, error)
 	Stats(ctx context.Context) (collect.Stats, error)
 	StreamLogs(ctx context.Context, unit string, lines int) (io.ReadCloser, error)
+	StreamDeploy(ctx context.Context) (io.ReadCloser, error)
 }
 
 // Model is the bubbletea model for the monitor.
@@ -75,6 +77,8 @@ type Model struct {
 
 	mode        mode
 	logUnit     string
+	logTitle    string
+	logDeploy   bool
 	logLines    []string
 	logErr      error
 	logStreamOn bool
@@ -178,13 +182,12 @@ func (m Model) statsTick() tea.Cmd {
 	return tea.Tick(m.statsEvery, func(t time.Time) tea.Msg { return statsTickMsg(t) })
 }
 
-// openLogStream starts `journalctl -f` for the unit and returns a message
-// carrying the channel and cancel function once the process is running.
-func (m Model) openLogStream(unit string, gen int) tea.Cmd {
-	source := m.source
+// openStream starts a long-lived command and returns a message carrying the
+// channel and cancel function once the process is running.
+func (m Model) openStream(gen int, unit string, open func(context.Context) (io.ReadCloser, error)) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithCancel(context.Background())
-		rc, err := source.StreamLogs(ctx, unit, logBacklog)
+		rc, err := open(ctx)
 		if err != nil {
 			cancel()
 			return logStreamStartMsg{unit: unit, gen: gen, err: err}
@@ -212,6 +215,22 @@ func (m Model) openLogStream(unit string, gen int) tea.Cmd {
 		}()
 		return logStreamStartMsg{unit: unit, gen: gen, ch: ch, cancel: cancel}
 	}
+}
+
+// openLogStream starts `journalctl -f` for the unit.
+func (m Model) openLogStream(unit string, gen int) tea.Cmd {
+	source := m.source
+	return m.openStream(gen, unit, func(ctx context.Context) (io.ReadCloser, error) {
+		return source.StreamLogs(ctx, unit, logBacklog)
+	})
+}
+
+// openDeployStream runs the app's pull-and-release script.
+func (m Model) openDeployStream(gen int) tea.Cmd {
+	source := m.source
+	return m.openStream(gen, "deploy", func(ctx context.Context) (io.ReadCloser, error) {
+		return source.StreamDeploy(ctx)
+	})
 }
 
 func waitForLogLine(ch chan logItem, unit string, gen int) tea.Cmd {
@@ -337,12 +356,31 @@ func (m *Model) openUnit(unit string) tea.Cmd {
 	m.logGen++
 	m.mode = modeLogs
 	m.logUnit = unit
+	m.logTitle = "logs: " + unit
+	m.logDeploy = false
 	m.logLines = nil
 	m.logErr = nil
 	m.logFollow = true
 	m.logY = 0
 	m.logX = 0
 	return m.openLogStream(unit, m.logGen)
+}
+
+// startDeploy begins the mutating deploy stream in the log pane. It is only
+// reached after the user confirms, and closing the view cancels it.
+func (m *Model) startDeploy() tea.Cmd {
+	m.stopLogStream()
+	m.logGen++
+	m.mode = modeLogs
+	m.logUnit = "deploy"
+	m.logTitle = "deploy: seasoning"
+	m.logDeploy = true
+	m.logLines = nil
+	m.logErr = nil
+	m.logFollow = true
+	m.logY = 0
+	m.logX = 0
+	return m.openDeployStream(m.logGen)
 }
 
 func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -384,9 +422,22 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case "G", "f":
 			m.logFollow = true
 		case "r":
+			if m.logDeploy {
+				return m, m.startDeploy()
+			}
 			return m, m.openUnit(m.logUnit)
 		}
 		m.clampLog()
+		return m, nil
+	}
+
+	if m.mode == modeConfirm {
+		switch key {
+		case "y", "enter":
+			return m, m.startDeploy()
+		case "n", "q", "esc", "backspace":
+			m.mode = modeSummary
+		}
 		return m, nil
 	}
 
@@ -404,6 +455,10 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.selected < len(m.snap.Services)-1 {
 			m.selected++
 		}
+	case "d":
+		if m.selected < len(m.snap.Services) && m.snap.Services[m.selected].IsApp() {
+			m.mode = modeConfirm
+		}
 	case "enter":
 		if len(m.snap.Services) == 0 {
 			return m, nil
@@ -416,15 +471,33 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // View renders the current screen.
 func (m Model) View() tea.View {
 	var content string
-	if m.mode == modeLogs {
+	switch m.mode {
+	case modeLogs:
 		content = m.viewLogs()
-	} else {
+	case modeConfirm:
+		content = m.viewConfirm()
+	default:
 		content = m.viewSummary()
 	}
 	v := tea.NewView(content)
 	v.AltScreen = true
 	v.ProgressBar = m.progressBar()
 	return v
+}
+
+// viewConfirm asks the user to approve a mutating action.
+func (m Model) viewConfirm() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("deploy seasoning?"))
+	b.WriteString("\n\n")
+	b.WriteString(warnStyle.Render("Updates the app checkout, runs migrations, and restarts the Rails service."))
+	b.WriteString("\n\n")
+	b.WriteString(labelStyle.Render("command"))
+	b.WriteString("\n")
+	b.WriteString(dimStyle.Render("  " + collect.DeployCommand))
+	b.WriteString("\n\n")
+	b.WriteString(dimStyle.Render("y confirm  n cancel"))
+	return b.String()
 }
 
 // busy reports whether any background work is in flight.
@@ -481,7 +554,11 @@ func (m Model) viewSummary() string {
 	}
 
 	b.WriteString("\n")
-	b.WriteString(dimStyle.Render("j/k move  enter logs  r refresh  q quit"))
+	hint := "j/k move  enter logs  r refresh  q quit"
+	if m.selected < len(m.snap.Services) && m.snap.Services[m.selected].IsApp() {
+		hint = "j/k move  enter logs  d deploy  r refresh  q quit"
+	}
+	b.WriteString(dimStyle.Render(hint))
 	return b.String()
 }
 
@@ -726,7 +803,11 @@ func (m Model) renderTarget(s collect.Service) string {
 
 func (m Model) viewLogs() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("logs: " + m.logUnit))
+	title := m.logTitle
+	if title == "" {
+		title = "logs: " + m.logUnit
+	}
+	b.WriteString(titleStyle.Render(title))
 	switch {
 	case m.logStreamOn:
 		b.WriteString("  ")

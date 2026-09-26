@@ -4,16 +4,7 @@ Ideas and planned work for seasoning-monitor. Rough order, not a commitment.
 
 ## Next
 
-- [ ] **Deploy the app from the TUI.** Add a binding (say `d`, only when the
-      Rails app row is selected) that runs
-      `cd /home/maxwell/Documents/seasoning && bin/pull-and-release` over ssh
-      and streams the output into the log pane.
-      - That script runs `git pull`, `bundle install`, `npm`, `db:prepare`,
-        `assets:precompile`, and `sudo systemctl restart seasoning`, so it
-        mutates the host. Gate it behind a confirmation prompt.
-      - It ends with `sudo systemctl restart seasoning`; verify the `maxwell`
-        user can run that without a TTY/password prompt, otherwise it will
-        hang when driven over ssh.
+_(nothing queued)_
 
 ## Later
 
@@ -63,3 +54,6 @@ them once they exist. Deliberately described, not implemented, here.
 - [x] Traffic (24h) with a status breakdown, and 5xx highlighted.
 - [x] Health checks: failed units, Postgres size/connections, backup freshness,
       and nginx error counts.
+- [x] Deploy the app from the TUI: a `d` binding on the app row, gated behind a
+      confirmation, streams `bin/pull-and-release` into the log pane and can be
+      cancelled mid-flight.
