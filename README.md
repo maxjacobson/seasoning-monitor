@@ -42,8 +42,8 @@ The same commands work through `go run .` with the flags `--probe`, `--once`,
 `--refresh <duration>` (default `5s`), and `--stats-refresh <duration>`
 (default `30s`).
 
-The summary reloads itself every few seconds (see `--refresh`), showing a
-`refreshing...` hint while a load is in flight. Press `r` to refresh on demand.
+The summary reloads itself every few seconds (see `--refresh`). Press `r` to
+refresh on demand.
 
 ### Keys
 

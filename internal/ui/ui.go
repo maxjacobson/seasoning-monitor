@@ -439,9 +439,6 @@ func (m Model) viewSummary() string {
 	if !m.snap.CollectedAt.IsZero() {
 		b.WriteString(dimStyle.Render("  updated " + m.snap.CollectedAt.Format("15:04:05")))
 	}
-	if m.loading {
-		b.WriteString(dimStyle.Render("  refreshing..."))
-	}
 	b.WriteString("\n\n")
 
 	if m.err != nil {
