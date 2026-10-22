@@ -38,10 +38,6 @@ them once they exist. Deliberately described, not implemented, here.
   queue depth), giving an end-to-end latency signal.
 - **nginx `real_ip` + `$upstream_response_time`** in `log_format`: today every
   request appears as `127.0.0.1` (cloudflared), and there's no latency.
-- **Backup verification:** the `seasoning-pi-backer-upper` IAM user can only
-  `PutObject`, so we can't confirm an object exists from the Pi. Granting
-  `s3:ListBucket` (or `s3:GetObject` on the prefix) would let us verify the
-  newest dump is really there.
 
 ## Done
 
@@ -57,3 +53,7 @@ them once they exist. Deliberately described, not implemented, here.
 - [x] Deploy the app from the TUI: a `d` binding on the app row, gated behind a
       confirmation, streams `bin/pull-and-release` into the log pane and can be
       cancelled mid-flight.
+- [x] Backup verification via S3: the monitor lists the backup bucket directly
+      (`s3:ListBucket` granted to `seasoning-pi-backer-upper`), so the newest
+      dump's existence, age, and size come from ground truth rather than the
+      volatile journal, which rebooting the Pi wipes.

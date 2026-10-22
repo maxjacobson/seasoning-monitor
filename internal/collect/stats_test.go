@@ -38,42 +38,6 @@ func TestParseDatabase(t *testing.T) {
 	}
 }
 
-func TestParseBackup(t *testing.T) {
-	line := "2026-09-25T00:00:11-04:00 maxwells-raspberry-pi-5 backup-db[105670]: Backed up to s3://bucket/seasoning_production_20260925_000007.dump.gz"
-	got := parseBackup(line)
-	if !got.OK {
-		t.Fatalf("backup = %+v", got)
-	}
-	if got.At.Unix() != time.Date(2026, 9, 25, 4, 0, 11, 0, time.UTC).Unix() {
-		t.Errorf("backup at = %v", got.At)
-	}
-	if got.Key != "bucket/seasoning_production_20260925_000007.dump.gz" {
-		t.Errorf("backup key = %q", got.Key)
-	}
-
-	if got := parseBackup(""); got.OK {
-		t.Errorf("empty backup should not be OK")
-	}
-	if got := parseBackup("not a timestamp"); got.OK {
-		t.Errorf("malformed backup should not be OK")
-	}
-}
-
-func TestBackupStale(t *testing.T) {
-	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
-	fresh := Backup{At: now.Add(-12 * time.Hour), OK: true}
-	if fresh.Stale(now) {
-		t.Errorf("12h old backup should be fresh")
-	}
-	old := Backup{At: now.Add(-30 * time.Hour), OK: true}
-	if !old.Stale(now) {
-		t.Errorf("30h old backup should be stale")
-	}
-	if (Backup{}).Stale(now) {
-		t.Errorf("a missing backup should not be reported stale, just missing")
-	}
-}
-
 func TestParseNginx(t *testing.T) {
 	got := parseNginx("count=3\nlast_epoch=1790395200")
 	if got.Count != 3 || !got.LastOK || got.LastAt.Unix() != 1790395200 {
@@ -108,8 +72,6 @@ foo.service
 count=0
 @@SM:DB@@
 104 MB 7
-@@SM:BACKUP@@
-2026-09-25T00:00:11-04:00 host backup-db[1]: Backed up to s3://bucket/key.dump.gz
 `
 	got := parseStats(out)
 	if got.Traffic.Requests != 10 {
@@ -123,8 +85,5 @@ count=0
 	}
 	if !got.Database.OK || got.Database.Connections != 7 {
 		t.Errorf("database = %+v", got.Database)
-	}
-	if !got.Backup.OK || got.Backup.Key != "bucket/key.dump.gz" {
-		t.Errorf("backup = %+v", got.Backup)
 	}
 }

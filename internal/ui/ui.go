@@ -36,6 +36,10 @@ const (
 	// defaultStatsRefresh is how often the expensive stats reload. They scan
 	// the journal, so they run far less often than the summary.
 	defaultStatsRefresh = 30 * time.Second
+	// defaultBackupRefresh is how often the S3 backup check reloads. The
+	// newest dump only changes once a day, so hammering S3 every stats
+	// refresh would be pure noise; this is slow on purpose.
+	defaultBackupRefresh = 10 * time.Minute
 )
 
 var (
@@ -49,11 +53,12 @@ var (
 	panelStyle    = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(0, 1)
 )
 
-// Source provides snapshots, slower stats, and streaming logs.
-// collect.Collector implements it; tests substitute fakes.
+// Source provides snapshots, slower stats, the S3 backup check, and
+// streaming logs. collect.Collector implements it; tests substitute fakes.
 type Source interface {
 	Snapshot(ctx context.Context) (collect.Snapshot, error)
 	Stats(ctx context.Context) (collect.Stats, error)
+	Backup(ctx context.Context) (collect.Backup, error)
 	StreamLogs(ctx context.Context, unit string, lines int) (io.ReadCloser, error)
 	StreamDeploy(ctx context.Context) (io.ReadCloser, error)
 }
@@ -64,6 +69,7 @@ type Model struct {
 	ctx          context.Context
 	refreshEvery time.Duration
 	statsEvery   time.Duration
+	backupEvery  time.Duration
 
 	snap    collect.Snapshot
 	err     error
@@ -72,6 +78,10 @@ type Model struct {
 	stats        collect.Stats
 	statsErr     error
 	statsLoading bool
+
+	backup        collect.Backup
+	backupErr     error
+	backupLoading bool
 
 	width, height int
 	selected      int
@@ -95,22 +105,28 @@ type Model struct {
 
 // New builds a Model bound to the given source. refresh is how often the
 // summary reloads itself; statsRefresh is the slower cadence for traffic and
-// other expensive-to-gather numbers. Values <= 0 use defaults.
-func New(ctx context.Context, source Source, refresh, statsRefresh time.Duration) Model {
+// other expensive-to-gather numbers; backupRefresh is the slowest cadence,
+// for the S3 backup check. Values <= 0 use defaults.
+func New(ctx context.Context, source Source, refresh, statsRefresh, backupRefresh time.Duration) Model {
 	if refresh <= 0 {
 		refresh = defaultRefresh
 	}
 	if statsRefresh <= 0 {
 		statsRefresh = defaultStatsRefresh
 	}
+	if backupRefresh <= 0 {
+		backupRefresh = defaultBackupRefresh
+	}
 	return Model{
-		source:       source,
-		ctx:          ctx,
-		refreshEvery: refresh,
-		statsEvery:   statsRefresh,
-		loading:      true,
-		statsLoading: true,
-		logFollow:    true,
+		source:        source,
+		ctx:           ctx,
+		refreshEvery:  refresh,
+		statsEvery:    statsRefresh,
+		backupEvery:   backupRefresh,
+		loading:       true,
+		statsLoading:  true,
+		backupLoading: true,
+		logFollow:     true,
 	}
 }
 
@@ -162,6 +178,15 @@ type statsMsg struct {
 // statsTickMsg triggers a periodic stats refresh.
 type statsTickMsg time.Time
 
+// backupMsg carries the newest backup (or a collection error).
+type backupMsg struct {
+	backup collect.Backup
+	err    error
+}
+
+// backupTickMsg triggers a periodic backup refresh.
+type backupTickMsg time.Time
+
 func (m Model) load() tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(m.ctx, 30*time.Second)
@@ -180,8 +205,21 @@ func (m Model) loadStats() tea.Cmd {
 	}
 }
 
+func (m Model) loadBackup() tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(m.ctx, 30*time.Second)
+		defer cancel()
+		backup, err := m.source.Backup(ctx)
+		return backupMsg{backup: backup, err: err}
+	}
+}
+
 func (m Model) statsTick() tea.Cmd {
 	return tea.Tick(m.statsEvery, func(t time.Time) tea.Msg { return statsTickMsg(t) })
+}
+
+func (m Model) backupTick() tea.Cmd {
+	return tea.Tick(m.backupEvery, func(t time.Time) tea.Msg { return backupTickMsg(t) })
 }
 
 // openStream starts a long-lived command and returns a message carrying the
@@ -261,7 +299,7 @@ func (m Model) tick() tea.Cmd {
 
 // Init kicks off the first loads and the refresh timers.
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.load(), m.loadStats(), m.tick(), m.statsTick())
+	return tea.Batch(m.load(), m.loadStats(), m.loadBackup(), m.tick(), m.statsTick(), m.backupTick())
 }
 
 // Update handles messages.
@@ -347,6 +385,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.statsLoading = true
 		return m, tea.Batch(m.loadStats(), m.statsTick())
+
+	case backupMsg:
+		m.backupLoading = false
+		m.backupErr = msg.err
+		if msg.err == nil {
+			m.backup = msg.backup
+		}
+		return m, nil
+
+	case backupTickMsg:
+		if m.backupLoading {
+			return m, m.backupTick()
+		}
+		m.backupLoading = true
+		return m, tea.Batch(m.loadBackup(), m.backupTick())
 
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
@@ -592,7 +645,7 @@ func (m Model) viewStats() string {
 	if m.statsErr != nil {
 		return panelStyle.Render(badStyle.Render("stats error: " + m.statsErr.Error()))
 	}
-	if m.statsLoading && m.stats.Traffic.Requests == 0 {
+	if (m.statsLoading && m.stats.Traffic.Requests == 0) || (m.backupLoading && !m.backup.OK) {
 		return panelStyle.Render(dimStyle.Render("gathering traffic & health..."))
 	}
 
@@ -646,16 +699,23 @@ func (m Model) nginxStyle(now time.Time) lipgloss.Style {
 }
 
 func (m Model) backupText(now time.Time) string {
-	b := m.stats.Backup
+	if m.backupErr != nil {
+		return "unavailable"
+	}
+	b := m.backup
 	if !b.OK {
 		return "none found in 7 days"
 	}
-	return humanDuration(now.Sub(b.At)) + " ago"
+	text := humanDuration(now.Sub(b.At)) + " ago"
+	if b.FromS3 {
+		text += fmt.Sprintf(" · %s · s3", humanBytes(b.Size))
+	}
+	return text
 }
 
 func (m Model) backupStyle(now time.Time) lipgloss.Style {
-	b := m.stats.Backup
-	if !b.OK || b.Stale(now) {
+	b := m.backup
+	if m.backupErr != nil || !b.OK || b.Stale(now) {
 		return badStyle
 	}
 	return goodStyle
@@ -706,6 +766,24 @@ func humanCount(n int) string {
 		out.WriteByte(byte(c))
 	}
 	return out.String()
+}
+
+// humanBytes renders a dump size the way ls -lh would, so "12.3 MB" reads as
+// one glance instead of eight digits.
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	size := float64(n)
+	var suffix string
+	for _, suffix = range []string{"KB", "MB", "GB"} {
+		size /= unit
+		if size < unit {
+			break
+		}
+	}
+	return fmt.Sprintf("%.1f %s", size, suffix)
 }
 
 func (m Model) diskText() string {

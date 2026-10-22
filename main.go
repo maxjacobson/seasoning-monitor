@@ -25,6 +25,7 @@ func main() {
 	execCmd := flag.String("exec", "", "run an arbitrary read-only shell command over ssh and exit")
 	refresh := flag.Duration("refresh", 5*time.Second, "how often the summary auto-refreshes")
 	statsRefresh := flag.Duration("stats-refresh", 30*time.Second, "how often traffic/health stats refresh")
+	backupRefresh := flag.Duration("backup-refresh", 10*time.Minute, "how often the S3 backup check refreshes")
 	timeout := flag.Duration("timeout", 30*time.Second, "per-command timeout")
 	flag.Parse()
 
@@ -64,22 +65,23 @@ func main() {
 			os.Exit(1)
 		}
 		stats, statsErr := collector.Stats(ctx)
+		backup, backupErr := collector.Backup(ctx)
 		if *probe {
-			printProbe(snap, stats, statsErr)
+			printProbe(snap, stats, statsErr, backup, backupErr)
 		} else {
-			printSummary(snap, stats, statsErr)
+			printSummary(snap, stats, statsErr, backup, backupErr)
 		}
 		return
 	}
 
-	p := tea.NewProgram(ui.New(ctx, collector, *refresh, *statsRefresh))
+	p := tea.NewProgram(ui.New(ctx, collector, *refresh, *statsRefresh, *backupRefresh))
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
 }
 
-func printProbe(s collect.Snapshot, stats collect.Stats, statsErr error) {
+func printProbe(s collect.Snapshot, stats collect.Stats, statsErr error, backup collect.Backup, backupErr error) {
 	fmt.Printf("collected: %s\n", s.CollectedAt.Format(time.RFC3339))
 	fmt.Printf("disk:      %d%% used, %s free on %s\n", s.Disk.Percent, s.Disk.Avail, s.Disk.Mount)
 	fmt.Printf("mem:       %d/%d MB used, %d MB available\n", s.Mem.UsedMB, s.Mem.TotalMB, s.Mem.AvailableMB)
@@ -105,10 +107,10 @@ func printProbe(s collect.Snapshot, stats collect.Stats, statsErr error) {
 		}
 		fmt.Println(line)
 	}
-	printStats(stats, statsErr)
+	printStats(stats, statsErr, backup, backupErr)
 }
 
-func printStats(stats collect.Stats, statsErr error) {
+func printStats(stats collect.Stats, statsErr error, backup collect.Backup, backupErr error) {
 	if statsErr != nil {
 		fmt.Printf("stats:     error: %s\n", statsErr)
 		return
@@ -123,15 +125,21 @@ func printStats(stats collect.Stats, statsErr error) {
 	if stats.Database.OK {
 		fmt.Printf("postgres:  %s, %d connections\n", stats.Database.Size, stats.Database.Connections)
 	}
-	if stats.Backup.OK {
-		fmt.Printf("backup:    %s (%s)\n", stats.Backup.At.Format(time.RFC3339), stats.Backup.Key)
+	if backupErr != nil {
+		fmt.Printf("backup:    error: %s\n", backupErr)
+	} else if backup.OK {
+		line := fmt.Sprintf("backup:    %s (%s", backup.At.Format(time.RFC3339), backup.Key)
+		if backup.FromS3 {
+			line += fmt.Sprintf(", %s, s3", humanBytes(backup.Size))
+		}
+		fmt.Println(line + ")")
 	} else {
-		fmt.Printf("backup:    none found in 7 days\n")
+		fmt.Println("backup:    none found in 7 days")
 	}
 	fmt.Printf("nginx:     %s\n", stats.Nginx.Summary(time.Now()))
 }
 
-func printSummary(s collect.Snapshot, stats collect.Stats, statsErr error) {
+func printSummary(s collect.Snapshot, stats collect.Stats, statsErr error, backup collect.Backup, backupErr error) {
 	fmt.Printf("seasoning health @ %s\n", s.CollectedAt.Format("15:04:05"))
 	fmt.Printf("  disk   %d%% used (%s free on %s)\n", s.Disk.Percent, s.Disk.Avail, s.Disk.Mount)
 	if s.Mem.TotalMB > 0 {
@@ -169,10 +177,16 @@ func printSummary(s collect.Snapshot, stats collect.Stats, statsErr error) {
 	if stats.Database.OK {
 		fmt.Printf("  postgres %s, %d conns\n", stats.Database.Size, stats.Database.Connections)
 	}
-	if stats.Backup.OK {
-		fmt.Printf("  backup   %s\n", humanAgo(stats.Backup.At, s.CollectedAt))
+	if backupErr != nil {
+		fmt.Printf("  backup   error: %s\n", backupErr)
+	} else if backup.OK {
+		line := "  backup   " + humanAgo(backup.At, s.CollectedAt)
+		if backup.FromS3 {
+			line += fmt.Sprintf(" · %s · s3", humanBytes(backup.Size))
+		}
+		fmt.Println(line)
 	} else {
-		fmt.Printf("  backup   none found in 7 days\n")
+		fmt.Println("  backup   none found in 7 days")
 	}
 	fmt.Printf("  nginx    %s\n", stats.Nginx.Summary(s.CollectedAt))
 }
@@ -192,4 +206,21 @@ func humanAgo(at, now time.Time) string {
 	default:
 		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
 	}
+}
+
+// humanBytes mirrors the TUI's dump size formatting for the text modes.
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	size := float64(n)
+	var suffix string
+	for _, suffix = range []string{"KB", "MB", "GB"} {
+		size /= unit
+		if size < unit {
+			break
+		}
+	}
+	return fmt.Sprintf("%.1f %s", size, suffix)
 }
