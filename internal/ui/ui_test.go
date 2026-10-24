@@ -635,6 +635,50 @@ func TestOpeningUnitLogsClearsDeployFlag(t *testing.T) {
 	}
 }
 
+func TestErrorKeyOpensNginxErrors(t *testing.T) {
+	m := New(context.Background(), collect.Collector{}, 0, 0, 0)
+	m = update(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = update(m, snapshotMsg{snap: sampleSnapshot()})
+
+	if !strings.Contains(m.View().Content, "e errors") {
+		t.Errorf("the summary hint should advertise e:\n%s", m.View().Content)
+	}
+
+	m, cmd := updateCmd(m, runeKey('e'))
+	if m.mode != modeLogs {
+		t.Fatalf("e should open the error pane, mode = %v", m.mode)
+	}
+	if cmd == nil {
+		t.Fatalf("e should start the error stream")
+	}
+	if m.logUnit != "nginx" || m.logTitle != "errors: nginx" {
+		t.Errorf("error pane identity = %q / %q", m.logUnit, m.logTitle)
+	}
+	if m.logDeploy {
+		t.Errorf("the error pane must not be a deploy")
+	}
+	if !strings.Contains(m.View().Content, "errors: nginx") {
+		t.Errorf("error pane missing its title:\n%s", m.View().Content)
+	}
+}
+
+func TestNginxErrorRestartKeepsStreamingErrors(t *testing.T) {
+	m := New(context.Background(), collect.Collector{}, 0, 0, 0)
+	m = update(m, snapshotMsg{snap: sampleSnapshot()})
+	m, _ = updateCmd(m, runeKey('e'))
+
+	m, cmd := updateCmd(m, runeKey('r'))
+	if cmd == nil {
+		t.Fatalf("r should restart the error stream")
+	}
+	if m.logTitle != "errors: nginx" || m.logUnit != "nginx" {
+		t.Errorf("r should keep showing nginx errors, got %q / %q", m.logTitle, m.logUnit)
+	}
+	if m.logDeploy {
+		t.Errorf("restarting must not turn into a deploy")
+	}
+}
+
 // closingReader stands in for an ssh stream: it yields the recorded output and
 // reports the command's exit status from Close.
 type closingReader struct {
@@ -647,6 +691,7 @@ func (c *closingReader) Close() error               { return c.err }
 
 type fakeSource struct {
 	deploy io.ReadCloser
+	nginx  io.ReadCloser
 }
 
 func (f fakeSource) Snapshot(context.Context) (collect.Snapshot, error) {
@@ -658,6 +703,9 @@ func (f fakeSource) StreamLogs(context.Context, string, int) (io.ReadCloser, err
 	return io.NopCloser(strings.NewReader("")), nil
 }
 func (f fakeSource) StreamDeploy(context.Context) (io.ReadCloser, error) { return f.deploy, nil }
+func (f fakeSource) StreamNginxErrors(context.Context, int) (io.ReadCloser, error) {
+	return f.nginx, nil
+}
 
 // drain runs a command and the chain of commands it schedules, so a streamed
 // deploy is exercised end to end.
@@ -701,6 +749,22 @@ func TestDeployStreamReportsSuccess(t *testing.T) {
 	}
 	if !strings.Contains(m.View().Content, "deploy finished successfully") {
 		t.Errorf("expected a success banner:\n%s", m.View().Content)
+	}
+}
+
+func TestNginxErrorStreamShowsLines(t *testing.T) {
+	src := fakeSource{nginx: &closingReader{r: strings.NewReader("2026-09-25T11:00:00 [error] connect() failed\n")}}
+	m := New(context.Background(), src, 0, 0, 0)
+	m = update(m, tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = update(m, snapshotMsg{snap: sampleSnapshot()})
+	m, cmd := updateCmd(m, runeKey('e'))
+
+	m = drain(m, cmd)
+	if !m.logDone || m.logErr != nil {
+		t.Fatalf("expected a clean finish, done=%v err=%v", m.logDone, m.logErr)
+	}
+	if !strings.Contains(m.View().Content, "[error] connect() failed") {
+		t.Errorf("error pane missing the streamed line:\n%s", m.View().Content)
 	}
 }
 

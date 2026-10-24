@@ -217,6 +217,38 @@ func TestStreamDeploy(t *testing.T) {
 	}
 }
 
+func TestStreamNginxErrors(t *testing.T) {
+	cmd := "tail -n 300 -f /var/log/nginx/error.log | grep --line-buffered -E '\\[(crit|error|alert|emerg)\\]'"
+	runner := pi.FakeRunner{Streams: map[string]string{cmd: "2026-09-25 [error] boom\n"}}
+	c := Collector{Runner: runner}
+
+	rc, err := c.StreamNginxErrors(context.Background(), 300)
+	if err != nil {
+		t.Fatalf("StreamNginxErrors: %v", err)
+	}
+	defer rc.Close()
+
+	data, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(data) != "2026-09-25 [error] boom\n" {
+		t.Errorf("error stream = %q", string(data))
+	}
+}
+
+func TestStreamNginxErrorsDefaultLines(t *testing.T) {
+	cmd := "tail -n 200 -f /var/log/nginx/error.log | grep --line-buffered -E '\\[(crit|error|alert|emerg)\\]'"
+	runner := pi.FakeRunner{Streams: map[string]string{cmd: ""}}
+	c := Collector{Runner: runner}
+
+	rc, err := c.StreamNginxErrors(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("StreamNginxErrors: %v", err)
+	}
+	defer rc.Close()
+}
+
 func TestParseTimersEdgeCases(t *testing.T) {
 	empty := []struct {
 		name string

@@ -200,6 +200,17 @@ func (c Collector) StreamDeploy(ctx context.Context) (io.ReadCloser, error) {
 	return c.Runner.Stream(ctx, DeployCommand)
 }
 
+// StreamNginxErrors returns a reader over nginx's error log, filtered to the
+// same levels the Stats count greps for, that keeps yielding new lines as they
+// are written (`tail -f`). Closing the reader stops it.
+func (c Collector) StreamNginxErrors(ctx context.Context, lines int) (io.ReadCloser, error) {
+	if lines <= 0 {
+		lines = 200
+	}
+	cmd := fmt.Sprintf("tail -n %d -f /var/log/nginx/error.log | grep --line-buffered -E '%s'", lines, nginxErrorPattern)
+	return c.Runner.Stream(ctx, cmd)
+}
+
 const snapshotScript = `echo '@@SM:DISK@@'; df -hP / | awk 'NR==2 {print $5, $4, $6}'
 echo '@@SM:MEM@@'; free -m | awk '/^Mem:/ {print $2, $3, $7}'
 echo '@@SM:LOAD@@'; cat /proc/loadavg

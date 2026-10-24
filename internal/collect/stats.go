@@ -60,6 +60,11 @@ func (n Nginx) Summary(now time.Time) string {
 	return fmt.Sprintf("%d %s · %s ago", n.Count, noun, shortDuration(now.Sub(n.LastAt)))
 }
 
+// nginxErrorPattern matches the log levels the monitor counts as nginx
+// errors. The stats script and the error stream share it so the counted lines
+// and the streamed lines can't drift apart.
+const nginxErrorPattern = `\[(crit|error|alert|emerg)\]`
+
 // Stats runs the traffic/health script over ssh and parses the result.
 func (c Collector) Stats(ctx context.Context) (Stats, error) {
 	out, err := c.Runner.Run(ctx, statsScript)
@@ -81,8 +86,8 @@ journalctl -u seasoning --since "24 hours ago" --no-pager 2>/dev/null | awk '
 echo '@@SM:FAILED@@'
 systemctl --failed --no-legend --no-pager 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i ~ /\.(service|timer|socket|mount|target|path|device)$/) {print $i; break}}'
 echo '@@SM:NGINX@@'
-n=$(grep -cE '\[(crit|error|alert|emerg)\]' /var/log/nginx/error.log 2>/dev/null || true); printf 'count=%s\n' "${n:-0}"
-last=$(grep -E '\[(crit|error|alert|emerg)\]' /var/log/nginx/error.log 2>/dev/null | tail -1 | cut -d' ' -f1,2)
+n=$(grep -cE '` + nginxErrorPattern + `' /var/log/nginx/error.log 2>/dev/null || true); printf 'count=%s\n' "${n:-0}"
+last=$(grep -E '` + nginxErrorPattern + `' /var/log/nginx/error.log 2>/dev/null | tail -1 | cut -d' ' -f1,2)
 if [ -n "$last" ]; then printf 'last_epoch=%s\n' "$(date -d "$last" +%s)"; fi
 echo '@@SM:DB@@'
 psql seasoning_production -h /var/run/postgresql -tAc "select pg_size_pretty(pg_database_size(current_database())) || ' ' || (select count(*) from pg_stat_activity)" 2>/dev/null || true

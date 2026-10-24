@@ -12,8 +12,9 @@ _(nothing queued)_
       current run has been throttled. A common Raspberry Pi failure mode.
 - [ ] **Disk growth per day** — track GB/day so a slowly filling disk is
       visible before it's a problem.
-- [ ] **Error log view** — a key that opens a filtered (`5xx`, `FATAL`) journal
-      or nginx error view, rather than only counts.
+- [ ] **Rails error view** — the 5xx/FATAL counterpart to the nginx error
+      view: a key that opens a filtered journal (`Completed 5xx`, `FATAL`),
+      so a red traffic breakdown can be drilled into too.
 - [ ] **Watch the Cloudflare tunnel** (`cloudflared`) alongside nginx.
 - [ ] **Pending system package upgrades** — show whether the Pi has OS package
       updates waiting (e.g. `apt list --upgradable`) and how many. Read-only for
@@ -57,3 +58,5 @@ them once they exist. Deliberately described, not implemented, here.
       (`s3:ListBucket` granted to `seasoning-pi-backer-upper`), so the newest
       dump's existence, age, and size come from ground truth rather than the
       volatile journal, which rebooting the Pi wipes.
+- [x] nginx error drilldown — `e` from the summary follows the filtered nginx
+      error log live in the log pane, the same viewer unit journals use.

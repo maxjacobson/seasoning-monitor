@@ -20,7 +20,9 @@ diagnostics, so nothing needs to be installed on the Pi.
   and the 2xx/3xx/4xx/5xx breakdown. The breakdown turns red if any 5xx appear.
 - **Health checks** — failed systemd units, Postgres size and connection count,
   how long ago the newest database backup was written (red if missing or
-  older than 26h), and recent nginx `[crit]/[error]` lines.
+  older than 26h), and recent nginx `[crit]/[error]` lines. Press `e` to
+  follow those nginx errors live, filtered to the same levels the count
+  greps for.
 
 Press `enter` on a row to follow its journal live (`journalctl -f`). New lines
 stream in as they are written; the header shows `● live` until the stream ends.
@@ -53,7 +55,8 @@ refresh on demand.
 | `h` / `l`   | pan logs left/right             |
 | `g` / `G`   | jump to top / bottom (follow)   |
 | `enter`     | follow logs for the selected unit |
-| `esc`       | back to the summary             |
+| `e`         | follow the nginx error log         |
+| `esc`       | back to the summary               |
 | `r`         | refresh (or restart the log stream) |
 | `q`         | quit                            |
 
@@ -77,6 +80,10 @@ activate, so a unit's schedule travels with its row. See
 Logs are streamed, not polled: opening a unit starts `journalctl -f` over ssh,
 a goroutine scans its output into a buffered channel, and bubbletea reads one
 line at a time. Closing the view cancels the stream. See `internal/ui/ui.go`.
+
+The nginx error view (`e`) is the same mechanism pointed at a different source:
+`tail -f /var/log/nginx/error.log`, filtered to the error levels the health
+checks count. See `internal/collect/collect.go`.
 
 The summary and the stats refresh on separate timers. Traffic is counted by
 scanning the journal for the last 24 hours, which is the most expensive thing

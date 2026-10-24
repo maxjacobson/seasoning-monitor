@@ -61,6 +61,7 @@ type Source interface {
 	Backup(ctx context.Context) (collect.Backup, error)
 	StreamLogs(ctx context.Context, unit string, lines int) (io.ReadCloser, error)
 	StreamDeploy(ctx context.Context) (io.ReadCloser, error)
+	StreamNginxErrors(ctx context.Context, lines int) (io.ReadCloser, error)
 }
 
 // Model is the bubbletea model for the monitor.
@@ -280,6 +281,14 @@ func (m Model) openDeployStream(gen int) tea.Cmd {
 	})
 }
 
+// openNginxErrorStream tails the filtered nginx error log.
+func (m Model) openNginxErrorStream(gen int) tea.Cmd {
+	source := m.source
+	return m.openStream(gen, "nginx", func(ctx context.Context) (io.ReadCloser, error) {
+		return source.StreamNginxErrors(ctx, logBacklog)
+	})
+}
+
 func waitForLogLine(ch chan logItem, unit string, gen int) tea.Cmd {
 	return func() tea.Msg {
 		item, ok := <-ch
@@ -416,38 +425,40 @@ func (m *Model) stopLogStream() {
 	m.logStreamOn = false
 }
 
-func (m *Model) openUnit(unit string) tea.Cmd {
+// resetLogPane clears the log pane for a new stream: unit and title identify
+// it, deploy records whether the stream is the mutating deploy.
+func (m *Model) resetLogPane(unit, title string, deploy bool) {
 	m.stopLogStream()
 	m.logGen++
 	m.mode = modeLogs
 	m.logUnit = unit
-	m.logTitle = "logs: " + unit
-	m.logDeploy = false
+	m.logTitle = title
+	m.logDeploy = deploy
 	m.logLines = nil
 	m.logErr = nil
 	m.logDone = false
 	m.logFollow = true
 	m.logY = 0
 	m.logX = 0
+}
+
+func (m *Model) openUnit(unit string) tea.Cmd {
+	m.resetLogPane(unit, "logs: "+unit, false)
 	return m.openLogStream(unit, m.logGen)
 }
 
 // startDeploy begins the mutating deploy stream in the log pane. It is only
 // reached after the user confirms, and closing the view cancels it.
 func (m *Model) startDeploy() tea.Cmd {
-	m.stopLogStream()
-	m.logGen++
-	m.mode = modeLogs
-	m.logUnit = "deploy"
-	m.logTitle = "deploy: seasoning"
-	m.logDeploy = true
-	m.logLines = nil
-	m.logErr = nil
-	m.logDone = false
-	m.logFollow = true
-	m.logY = 0
-	m.logX = 0
+	m.resetLogPane("deploy", "deploy: seasoning", true)
 	return m.openDeployStream(m.logGen)
+}
+
+// openNginxErrors streams the filtered nginx error log in the log pane. It is
+// the drilldown for the nginx line in the stats panel.
+func (m *Model) openNginxErrors() tea.Cmd {
+	m.resetLogPane("nginx", "errors: nginx", false)
+	return m.openNginxErrorStream(m.logGen)
 }
 
 func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -489,10 +500,16 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case "G", "f":
 			m.logFollow = true
 		case "r":
-			if m.logDeploy {
+			// "nginx" and "deploy" are pane identities, not systemd units, so
+			// restarting must reopen their streams rather than journalctl.
+			switch {
+			case m.logDeploy:
 				return m, m.startDeploy()
+			case m.logUnit == "nginx":
+				return m, m.openNginxErrors()
+			default:
+				return m, m.openUnit(m.logUnit)
 			}
-			return m, m.openUnit(m.logUnit)
 		}
 		m.clampLog()
 		return m, nil
@@ -522,6 +539,8 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.selected < len(m.snap.Services)-1 {
 			m.selected++
 		}
+	case "e":
+		return m, m.openNginxErrors()
 	case "d":
 		if m.selected < len(m.snap.Services) && m.snap.Services[m.selected].IsApp() {
 			m.mode = modeConfirm
@@ -621,9 +640,9 @@ func (m Model) viewSummary() string {
 	}
 
 	b.WriteString("\n")
-	hint := "j/k move  enter logs  r refresh  q quit"
+	hint := "j/k move  enter logs  e errors  r refresh  q quit"
 	if m.selected < len(m.snap.Services) && m.snap.Services[m.selected].IsApp() {
-		hint = "j/k move  enter logs  d deploy  r refresh  q quit"
+		hint = "j/k move  enter logs  e errors  d deploy  r refresh  q quit"
 	}
 	b.WriteString(dimStyle.Render(hint))
 	return b.String()
