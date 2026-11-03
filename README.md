@@ -4,6 +4,11 @@ A small TUI that watches the health of the Raspberry Pi that runs
 [Seasoning](https://www.seasoning.tv). It shells out to `ssh pi` for read-only
 diagnostics, so nothing needs to be installed on the Pi.
 
+> [!NOTE]
+> This is a vibecoded, just for fun little project. I am sure it is very
+> imperfect in many ways, but it's kind of fun to be able to conjure things
+> like this into existence.
+
 ## What it shows
 
 - **Disk** usage on `/`
