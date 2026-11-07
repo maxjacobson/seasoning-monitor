@@ -3,7 +3,7 @@ module github.com/maxjacobson/seasoning-monitor
 go 1.26.8
 
 require (
-	charm.land/bubbletea/v2 v2.1.0
+	charm.land/bubbletea/v2 v2.1.1
 	charm.land/lipgloss/v2 v2.0.6
 )
 
